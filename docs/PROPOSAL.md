@@ -1,9 +1,27 @@
 # Agentic memory for Equestrianism — build proposal
 
-> Placeholder name used throughout: **Girth** (the strap that holds
-> everything to the saddle — swap freely, this is not load-bearing).
-> Hand this file to Claude Code as the starting brief for a new
-> repository, `rxbynerd/girth`, alongside Stirrup, Chiron, and Hairpin.
+> **Historical record — read [`docs/DECISIONS.md`](DECISIONS.md) first.**
+> This is the original design brief, kept intact for context. Several of
+> its assumptions were checked against the real Stirrup codebase during
+> implementation and turned out to be wrong; two further decisions were
+> made by the project owner that supersede parts of this document. In
+> particular:
+>
+> - The placeholder name **Girth** was rejected (unintended
+>   connotations) in favour of **Billet** — the strap/buckle hardware
+>   that actually connects the girth to the saddle. The repository is
+>   `rxbynerd/billet`, not `rxbynerd/girth`.
+> - The v1 transport is an **MCP server over Streamable HTTP**, not
+>   connect-go/gRPC — Stirrup has no gRPC tool-calling path at all. The
+>   "Proposed RPC surface" protobuf sketch below is superseded; see
+>   DECISIONS.md for the actual tool surface.
+> - `session_id` and `namespace` are **not** per-call RPC parameters;
+>   both are bound at server config/startup. See DECISIONS.md.
+> - Go 1.26 (below) is corrected to whatever `go version` reports in the
+>   build environment (1.27 at time of writing).
+>
+> Everything else below — the non-goals, design tenets, cost-governance
+> framing, and safety posture — still holds for v1.
 
 ## Why this exists
 
@@ -53,19 +71,33 @@ for it.
 
 ## v1 scope
 
-1. A small Go service exposing two RPCs over connect-go (JSON/gRPC on
-   one h2c port, matching Hairpin's `JobService` pattern):
-   - `SaveMemory(session_id, content, kind?) -> memory_id`
-   - `SearchMemory(session_id | namespace, query, limit?) -> [records]`
+1. ~~A small Go service exposing two RPCs over connect-go (JSON/gRPC on
+   one h2c port, matching Hairpin's `JobService` pattern):~~ —
+   superseded: Stirrup dials tools over remote MCP (Streamable HTTP),
+   not connect-go/gRPC. Billet v1 is an MCP server with two tools
+   instead; see DECISIONS.md.
+   - ~~`SaveMemory(session_id, content, kind?) -> memory_id`~~ →
+     `save_memory(content, kind?) -> {memory_id, accepted}` (no
+     `session_id` parameter — bound at server config/startup)
+   - ~~`SearchMemory(session_id | namespace, query, limit?) -> [records]`~~
+     → `search_memory(query, limit?) -> {records}` (no `namespace`
+     parameter, for the same reason)
 2. A backend adapter interface with exactly one implementation in v1:
    AWS Bedrock AgentCore Memory.
-3. Declarative config (`GirthConfig`), `secret://` resolution, and a
-   `girth config` subcommand that emits resolved JSON without running
-   — mirroring `stirrup run-config` / `chiron research-config` so
-   pipelines can compose it the same way.
+3. Declarative config (~~`GirthConfig`~~ `BilletConfig`), `secret://`
+   resolution, and a ~~`girth config`~~ `billet config` subcommand that
+   emits resolved JSON without running — mirroring `stirrup run-config`
+   / `chiron research-config` so pipelines can compose it the same way.
 4. A cost/usage report on every response (see Cost governance).
 
 ## Proposed RPC surface (sketch — refine during implementation)
+
+> **Superseded — see DECISIONS.md.** Stirrup has no connect-go/gRPC
+> tool-calling path; its only external-tool mechanism is a remote MCP
+> client over Streamable HTTP. Billet v1 ships two MCP tools
+> (`save_memory`, `search_memory`) instead of this protobuf service, and
+> there is no `proto/` directory or buf module in this repository. Kept
+> below for historical context only.
 
 ```protobuf
 // proto/girth/v1/girth.proto
@@ -199,8 +231,11 @@ matching Stirrup and Hairpin. At minimum, document:
 
 ## Repo & build conventions
 
-- Go 1.26, single static binary, `Justfile` with `build` / `test` /
-  `vet` / `lint` / `ci` / `proto-lint` targets (`buf` for proto).
+- ~~Go 1.26~~ — corrected to the Go version actually installed in the
+  build environment (1.27) at implementation time; see DECISIONS.md.
+- Single static binary, `Justfile` with `build` / `test` / `vet` /
+  `lint` / `ci` targets. ~~`proto-lint` (`buf` for proto)~~ — dropped:
+  there is no protobuf in this design (see the RPC surface note above).
 - `docs/PROPOSAL.md` (this file, cleaned up), `docs/DECISIONS.md` as a
   running log, `AGENTS.md` / `CLAUDE.md` for orientation.
 - Apache-2.0, matching the rest of the suite.
