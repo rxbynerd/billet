@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -22,6 +23,35 @@ const (
 	// defaultSearchLimit matches Bedrock's numberOfResults convention
 	// (PROPOSAL.md) and the documented search_memory default.
 	defaultSearchLimit = 5
+	// maxSearchLimit bounds search_memory's caller-supplied limit. Without
+	// a ceiling, a value near or above math.MaxInt32 would silently wrap
+	// to a negative TopK/MaxResults once a backend converts it to int32.
+	maxSearchLimit = 100
+
+	// maxContentBytes bounds save_memory's content field. This is a
+	// caller-facing limit (returned as a normal validation error), not an
+	// attempt to size the backend's actual storage limits.
+	maxContentBytes = 256 << 10 // 256 KiB
+
+	// maxRequestBodyBytes bounds the entire MCP request body the
+	// Streamable HTTP handler will read, set explicitly rather than
+	// relying on the SDK's current default. It has headroom over
+	// maxContentBytes for the JSON-RPC/tool-call envelope and escaping
+	// overhead around a single save_memory call.
+	maxRequestBodyBytes = 1 << 20 // 1 MiB
+)
+
+// errBudgetExceeded, errSaveBackendUnavailable, and
+// errSearchBackendUnavailable are the only detail an MCP caller ever sees
+// for a budget rejection or a backend failure. The MCP endpoint is
+// unauthenticated by default (docs/security.md), so the real detail
+// (the exact cap and call count; AWS account IDs, ARNs, and request IDs
+// on a backend error) is logged server-side via log/slog instead of
+// returned to the caller.
+var (
+	errBudgetExceeded           = errors.New("budget exceeded")
+	errSaveBackendUnavailable   = errors.New("save_memory: backend unavailable")
+	errSearchBackendUnavailable = errors.New("search_memory: backend unavailable")
 )
 
 // Version is the Billet build version reported in the MCP Implementation
@@ -37,9 +67,13 @@ type Server struct {
 	budget  *cost.Guard
 }
 
-// New returns a Server delegating to b and gated by budget. budget must
-// not be nil; use cost.NewGuard(0, w) for an uncapped guard.
+// New returns a Server delegating to b and gated by budget. A nil budget
+// defaults to an uncapped guard (equivalent to cost.NewGuard(0, nil))
+// rather than panicking on first use.
 func New(b backend.Backend, budget *cost.Guard) *Server {
+	if budget == nil {
+		budget = cost.NewGuard(0, nil)
+	}
 	return &Server{backend: b, budget: budget}
 }
 
@@ -72,10 +106,20 @@ func (s *Server) Handler() http.Handler {
 
 	handler := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return server },
-		&mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true},
+		&mcp.StreamableHTTPOptions{
+			Stateless:           true,
+			JSONResponse:        true,
+			MaxRequestBodyBytes: maxRequestBodyBytes,
+		},
 	)
 
-	return acceptAnyMediaType(handler)
+	// CORS/DNS-rebinding protection: rejects a cross-origin browser
+	// request before it reaches the handler at all. The SDK's own
+	// StreamableHTTPOptions.CrossOriginProtection field is deprecated in
+	// favour of this external wrapping.
+	protected := http.NewCrossOriginProtection().Handler(handler)
+
+	return acceptAnyMediaType(protected)
 }
 
 // acceptAnyMediaType supplies a compliant Accept header when the request
@@ -91,7 +135,7 @@ func acceptAnyMediaType(h http.Handler) http.Handler {
 }
 
 type saveMemoryInput struct {
-	Content string `json:"content" jsonschema:"the raw turn content or an explicit fact to remember"`
+	Content string `json:"content" jsonschema:"the raw turn content or an explicit fact to remember; max 256 KiB"`
 	Kind    string `json:"kind,omitempty" jsonschema:"optional hint: 'event' or 'fact' (defaults to 'event')"`
 }
 
@@ -102,11 +146,15 @@ type saveMemoryOutput struct {
 
 func (s *Server) saveMemory(ctx context.Context, _ *mcp.CallToolRequest, in saveMemoryInput) (*mcp.CallToolResult, saveMemoryOutput, error) {
 	if err := s.budget.Allow(); err != nil {
-		return nil, saveMemoryOutput{}, err
+		slog.Warn("save_memory rejected by budget guard", "error", err)
+		return nil, saveMemoryOutput{}, errBudgetExceeded
 	}
 
 	if strings.TrimSpace(in.Content) == "" {
 		return nil, saveMemoryOutput{}, errors.New("save_memory: content must not be empty")
+	}
+	if len(in.Content) > maxContentBytes {
+		return nil, saveMemoryOutput{}, fmt.Errorf("save_memory: content exceeds the %d byte limit", maxContentBytes)
 	}
 
 	kind := backend.KindEvent
@@ -122,14 +170,15 @@ func (s *Server) saveMemory(ctx context.Context, _ *mcp.CallToolRequest, in save
 
 	id, err := s.backend.Save(ctx, backend.SaveRequest{Content: in.Content, Kind: kind})
 	if err != nil {
-		return nil, saveMemoryOutput{}, fmt.Errorf("save_memory: %w", err)
+		slog.Error("save_memory: backend Save failed", "error", err)
+		return nil, saveMemoryOutput{}, errSaveBackendUnavailable
 	}
 	return nil, saveMemoryOutput{MemoryID: id, Accepted: true}, nil
 }
 
 type searchMemoryInput struct {
 	Query string `json:"query" jsonschema:"the search query"`
-	Limit int    `json:"limit,omitempty" jsonschema:"maximum number of results (default 5)"`
+	Limit int    `json:"limit,omitempty" jsonschema:"maximum number of results (default 5, capped at 100)"`
 }
 
 type memoryRecord struct {
@@ -145,7 +194,8 @@ type searchMemoryOutput struct {
 
 func (s *Server) searchMemory(ctx context.Context, _ *mcp.CallToolRequest, in searchMemoryInput) (*mcp.CallToolResult, searchMemoryOutput, error) {
 	if err := s.budget.Allow(); err != nil {
-		return nil, searchMemoryOutput{}, err
+		slog.Warn("search_memory rejected by budget guard", "error", err)
+		return nil, searchMemoryOutput{}, errBudgetExceeded
 	}
 
 	if strings.TrimSpace(in.Query) == "" {
@@ -153,13 +203,17 @@ func (s *Server) searchMemory(ctx context.Context, _ *mcp.CallToolRequest, in se
 	}
 
 	limit := in.Limit
-	if limit <= 0 {
+	switch {
+	case limit <= 0:
 		limit = defaultSearchLimit
+	case limit > maxSearchLimit:
+		limit = maxSearchLimit
 	}
 
 	records, err := s.backend.Search(ctx, backend.SearchRequest{Query: in.Query, Limit: limit})
 	if err != nil {
-		return nil, searchMemoryOutput{}, fmt.Errorf("search_memory: %w", err)
+		slog.Error("search_memory: backend Search failed", "error", err)
+		return nil, searchMemoryOutput{}, errSearchBackendUnavailable
 	}
 
 	out := searchMemoryOutput{Records: make([]memoryRecord, len(records))}
