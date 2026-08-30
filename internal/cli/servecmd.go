@@ -24,6 +24,17 @@ import (
 // requests to finish after a shutdown signal.
 const shutdownGrace = 10 * time.Second
 
+// HTTP server timeouts. The MCP endpoint is unauthenticated by default
+// (docs/security.md), so bounding how long a connection may sit idle or
+// trickle in headers/a body matters: without these, a slow client (or a
+// deliberate slowloris) can hold a connection open indefinitely.
+const (
+	readHeaderTimeout = 5 * time.Second
+	readTimeout       = 30 * time.Second
+	writeTimeout      = 30 * time.Second
+	idleTimeout       = 120 * time.Second
+)
+
 func newServeCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -88,8 +99,12 @@ func runServe(cmd *cobra.Command, cfg config.BilletConfig) error {
 	srv := mcpserver.New(b, guard)
 
 	httpServer := &http.Server{
-		Addr:    cfg.Listen,
-		Handler: srv.Handler(),
+		Addr:              cfg.Listen,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
 	}
 
 	errCh := make(chan error, 1)
