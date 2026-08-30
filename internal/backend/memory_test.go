@@ -2,6 +2,8 @@ package backend
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 )
 
@@ -111,6 +113,42 @@ func TestMemorySearchRanksBestMatchFirst(t *testing.T) {
 	}
 	if len(results) == 0 || results[0].MemoryID != wantID {
 		t.Fatalf("Search top result = %+v, want memory %q first", results, wantID)
+	}
+}
+
+// TestMemoryConcurrentSaveAndSearch drives Save and Search from many
+// goroutines at once (run this test with -race) to prove the shared
+// record slice is never read or mutated unsynchronized, and that every
+// accepted Save is reflected in a final, unlocked Search.
+func TestMemoryConcurrentSaveAndSearch(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemoryBackend()
+
+	const goroutines = 50
+	var wg sync.WaitGroup
+	wg.Add(goroutines * 2)
+	for i := 0; i < goroutines; i++ {
+		go func(i int) {
+			defer wg.Done()
+			if _, err := m.Save(ctx, SaveRequest{Content: fmt.Sprintf("concurrent memory %d", i)}); err != nil {
+				t.Errorf("Save: %v", err)
+			}
+		}(i)
+		go func() {
+			defer wg.Done()
+			if _, err := m.Search(ctx, SearchRequest{Query: "concurrent"}); err != nil {
+				t.Errorf("Search: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	results, err := m.Search(ctx, SearchRequest{Query: "concurrent", Limit: goroutines})
+	if err != nil {
+		t.Fatalf("final Search: %v", err)
+	}
+	if len(results) != goroutines {
+		t.Fatalf("final Search returned %d records, want all %d saved records", len(results), goroutines)
 	}
 }
 

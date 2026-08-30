@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -47,6 +49,38 @@ func TestAllowErrorNeverIncrementsCount(t *testing.T) {
 	}
 	if got := g.Summary().Calls; got != 1 {
 		t.Errorf("Summary().Calls = %d, want 1 (blocked calls must not count)", got)
+	}
+}
+
+// TestGuardAllowRacesTheLimit drives Allow from many goroutines at once,
+// right at the budget cap boundary (run this test with -race). It proves
+// the check-then-increment in Allow is atomic under real contention: the
+// number of accepted calls must never exceed what the budget allows, not
+// just by code inspection of the mutex.
+func TestGuardAllowRacesTheLimit(t *testing.T) {
+	const allowedCalls = 20
+	budgetCap := float64(allowedCalls) * EstimatedCostPerCallGBP
+	g := NewGuard(budgetCap, &bytes.Buffer{})
+
+	const goroutines = 200
+	var accepted atomic.Uint64
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			if err := g.Allow(); err == nil {
+				accepted.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := accepted.Load(); got > allowedCalls {
+		t.Errorf("accepted %d calls concurrently, want at most %d for a %.4f GBP cap", got, allowedCalls, budgetCap)
+	}
+	if got := g.Summary().Calls; got != accepted.Load() {
+		t.Errorf("Summary().Calls = %d, want it to match the %d accepted calls", got, accepted.Load())
 	}
 }
 
