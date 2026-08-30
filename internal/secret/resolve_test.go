@@ -18,7 +18,7 @@ func TestFileResolveWarnsOnOpenPermissions(t *testing.T) {
 	ctx := context.Background()
 
 	open := filepath.Join(t.TempDir(), "key")
-	if err := os.WriteFile(open, []byte("k3y"), 0o644); err != nil {
+	if err := os.WriteFile(open, []byte("k3y"), 0o644); err != nil { //nolint:gosec // deliberately open permissions: this test exercises the warning they trigger
 		t.Fatal(err)
 	}
 	got, err := File{}.Resolve(ctx, "secret://file"+open)
