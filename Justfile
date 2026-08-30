@@ -1,8 +1,11 @@
 # Billet task runner. Run `just --list` for an overview.
 
-# Build the billet binary into ./bin.
+# Build the billet binary into ./bin. CGO_ENABLED=0 so the result is a
+# single static binary (confirmed statically linked when cross-compiled
+# for linux; macOS binaries always carry a minimal libSystem link, which
+# is a platform property, not evidence this flag had no effect).
 build:
-    go build -o bin/billet ./cmd/billet
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/billet ./cmd/billet
 
 # Run all tests.
 test:
