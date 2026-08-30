@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -24,16 +26,60 @@ type agentCoreAPI interface {
 	RetrieveMemoryRecords(ctx context.Context, params *bedrockagentcore.RetrieveMemoryRecordsInput, optFns ...func(*bedrockagentcore.Options)) (*bedrockagentcore.RetrieveMemoryRecordsOutput, error)
 }
 
+// regionShapePattern is a cheap sanity check on an AWS region string: two
+// or more lowercase alphanumeric segments joined by hyphens (matching
+// every standard, GovCloud, and China partition region observed in
+// practice, e.g. eu-west-2, us-gov-west-1, cn-north-1). It catches an
+// obvious typo (whitespace, a credential pasted into the region field, an
+// empty string) before any network call; it does not — and cannot,
+// without calling AWS — confirm the region actually exists (TODO.md).
+var regionShapePattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)+$`)
+
+func validRegionShape(region string) bool {
+	return regionShapePattern.MatchString(region)
+}
+
+// namespaceDelimiter separates a bound namespace from anything that might
+// follow it, so one namespace can never be mistaken for a prefix of
+// another under RetrieveMemoryRecords' prefix-match semantics (see
+// boundNamespace).
+const namespaceDelimiter = "/"
+
+// boundNamespace returns ns, trimmed, with namespaceDelimiter appended.
+// AgentCore's RetrieveMemoryRecords documents its Namespace field as a
+// *prefix* filter, not an exact match — so an unqualified namespace like
+// "acme" would also match records under "acme-corp" or "acme2". Appending
+// a delimiter before using the value as either AgentCore's actorId (on
+// write, via CreateEvent) or its namespace prefix (on read, via
+// RetrieveMemoryRecords) closes that gap: "acme/" cannot prefix-match
+// "acme-corp/". Both call sites bind the same boundNamespace value, so
+// reads and writes stay coherent.
+func boundNamespace(ns string) string {
+	return strings.TrimSpace(ns) + namespaceDelimiter
+}
+
+// probeCredentials resolves provider once so an absent or invalid AWS
+// credential chain fails backend construction immediately, rather than
+// being discovered silently on the first save_memory/search_memory call.
+func probeCredentials(ctx context.Context, provider aws.CredentialsProvider) error {
+	if provider == nil {
+		return errors.New("agentcore-memory: no AWS credentials provider configured")
+	}
+	if _, err := provider.Retrieve(ctx); err != nil {
+		return fmt.Errorf("agentcore-memory: resolve AWS credentials: %w", err)
+	}
+	return nil
+}
+
 // AgentCoreMemoryConfig configures the AgentCoreMemory backend.
 type AgentCoreMemoryConfig struct {
 	// Region is the AWS region hosting the AgentCore Memory resource.
 	Region string
 	// MemoryID identifies the AgentCore Memory resource.
 	MemoryID string
-	// Namespace is Billet's namespace, bound to AgentCore's actorId on
-	// every CreateEvent and used as the RetrieveMemoryRecords namespace
-	// filter (docs/DECISIONS.md; see TODO.md on the latter's namespace
-	// template assumption).
+	// Namespace is Billet's namespace. boundNamespace(Namespace) is bound
+	// to AgentCore's actorId on every CreateEvent and used as the
+	// RetrieveMemoryRecords namespace filter (docs/DECISIONS.md).
 	Namespace string
 	// SessionID scopes AgentCore's short-term/event memory. Empty
 	// generates a fresh one for this backend's lifetime — the v1
@@ -71,10 +117,13 @@ func NewAgentCoreMemory(ctx context.Context, cfg AgentCoreMemoryConfig, resolver
 	if cfg.Region == "" {
 		return nil, errors.New("agentcore-memory: region is required")
 	}
+	if !validRegionShape(cfg.Region) {
+		return nil, fmt.Errorf("agentcore-memory: region %q is not shaped like an AWS region", cfg.Region)
+	}
 	if cfg.MemoryID == "" {
 		return nil, errors.New("agentcore-memory: memoryId is required")
 	}
-	if cfg.Namespace == "" {
+	if strings.TrimSpace(cfg.Namespace) == "" {
 		return nil, errors.New("agentcore-memory: namespace is required")
 	}
 
@@ -92,7 +141,18 @@ func NewAgentCoreMemory(ctx context.Context, cfg AgentCoreMemoryConfig, resolver
 
 	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
 	if err != nil {
+		// A resolved credentialsRef that names a profile the shared config
+		// files don't have would otherwise propagate that value (the SDK's
+		// own error embeds it) straight into the startup log.
+		var profileNotExist awsconfig.SharedConfigProfileNotExistError
+		if errors.As(err, &profileNotExist) {
+			return nil, errors.New("agentcore-memory: the configured AWS shared-config profile does not exist")
+		}
 		return nil, fmt.Errorf("agentcore-memory: load AWS config: %w", err)
+	}
+
+	if err := probeCredentials(ctx, awsCfg.Credentials); err != nil {
+		return nil, err
 	}
 
 	sessionID := cfg.SessionID
@@ -106,7 +166,7 @@ func NewAgentCoreMemory(ctx context.Context, cfg AgentCoreMemoryConfig, resolver
 	return &AgentCoreMemory{
 		api:       bedrockagentcore.NewFromConfig(awsCfg),
 		memoryID:  cfg.MemoryID,
-		namespace: cfg.Namespace,
+		namespace: boundNamespace(cfg.Namespace),
 		sessionID: sessionID,
 	}, nil
 }
@@ -151,11 +211,21 @@ func (a *AgentCoreMemory) Save(ctx context.Context, req SaveRequest) (string, er
 	return aws.ToString(out.Event.EventId), nil
 }
 
+// maxSearchResults bounds the value Search converts to AWS's int32
+// MaxResults/TopK fields: without a ceiling, a Limit near or above
+// math.MaxInt32 would silently wrap to a negative value on conversion.
+// The MCP tool layer already clamps to this range (internal/mcpserver);
+// this is a second, backend-local guard for any other caller of Backend.
+const maxSearchResults = 100
+
 // Search implements Backend by calling RetrieveMemoryRecords.
 func (a *AgentCoreMemory) Search(ctx context.Context, req SearchRequest) ([]Record, error) {
 	limit := req.Limit
-	if limit <= 0 {
+	switch {
+	case limit <= 0:
 		limit = 5
+	case limit > maxSearchResults:
+		limit = maxSearchResults
 	}
 	topK := int32(limit)
 

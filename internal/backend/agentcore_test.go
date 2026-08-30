@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -268,7 +271,7 @@ func TestNewAgentCoreMemoryRequiresFields(t *testing.T) {
 }
 
 func TestNewAgentCoreMemoryFailsClosedOnUnresolvableCredentials(t *testing.T) {
-	cfg := AgentCoreMemoryConfig{
+	cfg := AgentCoreMemoryConfig{ //nolint:gosec // CredentialsRef below is a secret:// reference name, not a literal credential
 		Region:         "eu-west-2",
 		MemoryID:       "m",
 		Namespace:      "n",
@@ -286,4 +289,234 @@ type testResolver struct{}
 
 func (testResolver) Resolve(context.Context, string) (string, error) {
 	return "", errors.New("test resolver: not found")
+}
+
+// fixedResolver resolves every reference to the same fixed value,
+// regardless of the reference given — used to drive NewAgentCoreMemory's
+// AWS config loading with a known, controlled "profile name" without a
+// real internal/secret dependency.
+type fixedResolver struct{ value string }
+
+func (f fixedResolver) Resolve(context.Context, string) (string, error) {
+	return f.value, nil
+}
+
+func TestBoundNamespaceAppendsDelimiterAndTrims(t *testing.T) {
+	if got := boundNamespace("acme"); got != "acme/" {
+		t.Errorf("boundNamespace(%q) = %q, want %q", "acme", got, "acme/")
+	}
+	if got := boundNamespace("  acme  "); got != "acme/" {
+		t.Errorf("boundNamespace with surrounding whitespace = %q, want trimmed %q", got, "acme/")
+	}
+}
+
+// TestNamespaceDelimiterPreventsPrefixCollision is the key regression test
+// for the namespace isolation fix: "acme" is a strict prefix of
+// "acme-corp", and AgentCore's RetrieveMemoryRecords documents its
+// Namespace field as a *prefix* filter. Without a delimiter, a Billet
+// deployment bound to namespace "acme" would match records actually
+// written under "acme-corp" on a shared Memory resource.
+func TestNamespaceDelimiterPreventsPrefixCollision(t *testing.T) {
+	narrow := boundNamespace("acme")
+	wide := boundNamespace("acme-corp")
+	if strings.HasPrefix(wide, narrow) {
+		t.Fatalf("boundNamespace(%q) = %q is a prefix of boundNamespace(%q) = %q; namespace isolation is not structural", "acme-corp", wide, "acme", narrow)
+	}
+
+	fake := &fakeAgentCoreAPI{
+		createEventOut: &bedrockagentcore.CreateEventOutput{Event: &types.Event{EventId: aws.String("evt-1")}},
+		retrieveOut:    &bedrockagentcore.RetrieveMemoryRecordsOutput{},
+	}
+	a := &AgentCoreMemory{api: fake, memoryID: "m", namespace: narrow, sessionID: "s"}
+
+	if _, err := a.Save(context.Background(), SaveRequest{Content: "x"}); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if got := aws.ToString(fake.createEventInput.ActorId); got != narrow {
+		t.Errorf("ActorId sent = %q, want the delimited namespace %q", got, narrow)
+	}
+
+	if _, err := a.Search(context.Background(), SearchRequest{Query: "x"}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got := aws.ToString(fake.retrieveInput.Namespace); got != narrow {
+		t.Errorf("Namespace sent = %q, want the delimited namespace %q", got, narrow)
+	}
+}
+
+func TestValidRegionShape(t *testing.T) {
+	tests := []struct {
+		region string
+		want   bool
+	}{
+		{"eu-west-2", true},
+		{"us-gov-west-1", true},
+		{"cn-north-1", true},
+		{"il-central-1", true},
+		{"", false},
+		{"EU-WEST-2", false},
+		{" eu-west-2", false},
+		{"eu-west-2 ", false},
+		{"notaregion", false},
+		{"secret-credential-value", true}, // shape-only: cannot distinguish from a real region without calling AWS
+	}
+	for _, tt := range tests {
+		if got := validRegionShape(tt.region); got != tt.want {
+			t.Errorf("validRegionShape(%q) = %v, want %v", tt.region, got, tt.want)
+		}
+	}
+}
+
+func TestNewAgentCoreMemoryRejectsMalformedRegion(t *testing.T) {
+	cfg := AgentCoreMemoryConfig{Region: "not a region", MemoryID: "m", Namespace: "n"}
+	if _, err := NewAgentCoreMemory(context.Background(), cfg, nil); err == nil {
+		t.Fatal("NewAgentCoreMemory accepted a malformed region")
+	}
+}
+
+// TestNewAgentCoreMemorySharedConfigProfileNotExistDoesNotEchoValue pins
+// the fix for a resolved credentialsRef value (here, a bogus AWS
+// shared-config profile name) leaking into the startup error/log via the
+// AWS SDK's own error text.
+func TestNewAgentCoreMemorySharedConfigProfileNotExistDoesNotEchoValue(t *testing.T) {
+	empty := filepath.Join(t.TempDir(), "empty")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AWS_CONFIG_FILE", empty)
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", empty)
+
+	const profile = "definitely-not-a-real-profile-should-never-appear"
+	cfg := AgentCoreMemoryConfig{
+		Region:         "eu-west-2",
+		MemoryID:       "m",
+		Namespace:      "n",
+		CredentialsRef: "secret://whatever",
+	}
+	_, err := NewAgentCoreMemory(context.Background(), cfg, fixedResolver{value: profile})
+	if err == nil {
+		t.Fatal("NewAgentCoreMemory succeeded despite a nonexistent shared config profile")
+	}
+	if strings.Contains(err.Error(), profile) {
+		t.Fatalf("error echoes the resolved credentialsRef value: %v", err)
+	}
+}
+
+// fakeCredentialsProvider is a minimal aws.CredentialsProvider double, so
+// probeCredentials is verified without any real AWS call.
+type fakeCredentialsProvider struct {
+	err error
+}
+
+func (f fakeCredentialsProvider) Retrieve(context.Context) (aws.Credentials, error) {
+	if f.err != nil {
+		return aws.Credentials{}, f.err
+	}
+	return aws.Credentials{AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: "example"}, nil
+}
+
+func TestProbeCredentialsFailsClosedOnBadChain(t *testing.T) {
+	err := probeCredentials(context.Background(), fakeCredentialsProvider{err: errors.New("no credentials found")})
+	if err == nil {
+		t.Fatal("probeCredentials accepted a failing credentials provider")
+	}
+}
+
+func TestProbeCredentialsAcceptsWorkingChain(t *testing.T) {
+	if err := probeCredentials(context.Background(), fakeCredentialsProvider{}); err != nil {
+		t.Fatalf("probeCredentials rejected a working credentials provider: %v", err)
+	}
+}
+
+func TestProbeCredentialsRejectsNilProvider(t *testing.T) {
+	if err := probeCredentials(context.Background(), nil); err == nil {
+		t.Fatal("probeCredentials accepted a nil provider")
+	}
+}
+
+// TestAgentCoreMemorySaveWrapsTypedAWSError proves a typed AWS exception
+// survives Save's error wrapping via errors.As: the MCP layer now returns
+// only a generic message to the caller (internal/mcpserver), so the
+// detail needed for server-side logging must still be recoverable from
+// the error Save/Search return internally.
+func TestAgentCoreMemorySaveWrapsTypedAWSError(t *testing.T) {
+	fake := &fakeAgentCoreAPI{createEventErr: &types.AccessDeniedException{Message: aws.String("nope")}}
+	a := newTestAgentCoreMemory(fake)
+
+	_, err := a.Save(context.Background(), SaveRequest{Content: "x"})
+	if err == nil {
+		t.Fatal("Save succeeded despite an AccessDeniedException")
+	}
+	var accessDenied *types.AccessDeniedException
+	if !errors.As(err, &accessDenied) {
+		t.Fatalf("errors.As found no *types.AccessDeniedException in: %v", err)
+	}
+}
+
+func TestAgentCoreMemorySearchWrapsTypedAWSError(t *testing.T) {
+	fake := &fakeAgentCoreAPI{retrieveErr: &types.ThrottlingException{Message: aws.String("slow down")}}
+	a := newTestAgentCoreMemory(fake)
+
+	_, err := a.Search(context.Background(), SearchRequest{Query: "x"})
+	if err == nil {
+		t.Fatal("Search succeeded despite a ThrottlingException")
+	}
+	var throttling *types.ThrottlingException
+	if !errors.As(err, &throttling) {
+		t.Fatalf("errors.As found no *types.ThrottlingException in: %v", err)
+	}
+}
+
+// TestAgentCoreMemorySearchHandlesNonTextContentGracefully covers the
+// type-switch fallthrough in Search: as of bedrockagentcore v1.43.0,
+// *types.MemoryContentMemberText is the only known types.MemoryContent
+// implementation, so a record whose Content doesn't match it (nil, or any
+// future non-text variant AWS adds) is the reachable case today. It must
+// not panic, and should surface as an empty Content rather than fail the
+// whole Search.
+func TestAgentCoreMemorySearchHandlesNonTextContentGracefully(t *testing.T) {
+	fake := &fakeAgentCoreAPI{
+		retrieveOut: &bedrockagentcore.RetrieveMemoryRecordsOutput{
+			MemoryRecordSummaries: []types.MemoryRecordSummary{
+				{
+					MemoryRecordId: aws.String("rec-1"),
+					Content:        nil,
+					Score:          aws.Float64(0.5),
+				},
+			},
+		},
+	}
+	a := newTestAgentCoreMemory(fake)
+
+	records, err := a.Search(context.Background(), SearchRequest{Query: "x"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("Search returned %d records, want 1", len(records))
+	}
+	if records[0].MemoryID != "rec-1" {
+		t.Errorf("MemoryID = %q, want rec-1", records[0].MemoryID)
+	}
+	if records[0].Content != "" {
+		t.Errorf("Content = %q, want empty for a non-text/absent content record", records[0].Content)
+	}
+}
+
+func TestAgentCoreMemorySearchClampsLimitAboveMax(t *testing.T) {
+	fake := &fakeAgentCoreAPI{retrieveOut: &bedrockagentcore.RetrieveMemoryRecordsOutput{}}
+	a := newTestAgentCoreMemory(fake)
+
+	if _, err := a.Search(context.Background(), SearchRequest{Query: "x", Limit: 1 << 31}); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got := aws.ToInt32(fake.retrieveInput.MaxResults); got != maxSearchResults {
+		t.Errorf("MaxResults = %d, want the %d ceiling", got, maxSearchResults)
+	}
+	if got := aws.ToInt32(fake.retrieveInput.SearchCriteria.TopK); got != maxSearchResults {
+		t.Errorf("TopK = %d, want the %d ceiling", got, maxSearchResults)
+	}
+	if got := aws.ToInt32(fake.retrieveInput.MaxResults); got < 0 {
+		t.Fatalf("MaxResults wrapped negative: %d", got)
+	}
 }
