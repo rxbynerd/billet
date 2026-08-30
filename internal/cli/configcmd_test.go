@@ -134,7 +134,10 @@ func TestConfigCommandRedactsCredentialsRef(t *testing.T) {
 	}
 }
 
-func TestConfigCommandWithoutRedactKeepsCredentialsRef(t *testing.T) {
+// TestConfigCommandRedactsCredentialsRefByDefault pins --redact's default:
+// a stray `billet config` must never print a live credentialsRef in
+// cleartext without an explicit opt-out.
+func TestConfigCommandRedactsCredentialsRefByDefault(t *testing.T) {
 	stdout, _, err := execute(t, "config", "--credentials-ref", "secret://AWS_PROFILE")
 	if err != nil {
 		t.Fatalf("config: %v", err)
@@ -144,8 +147,41 @@ func TestConfigCommandWithoutRedactKeepsCredentialsRef(t *testing.T) {
 		t.Fatalf("stdout is not one JSON document: %v\n%s", err, stdout)
 	}
 	backend, _ := cfg["backend"].(map[string]any)
+	if backend["credentialsRef"] != "secret://[REDACTED]" {
+		t.Errorf("credentialsRef = %v, want redacted by default", backend["credentialsRef"])
+	}
+}
+
+func TestConfigCommandRedactFalseKeepsCredentialsRef(t *testing.T) {
+	stdout, _, err := execute(t, "config", "--credentials-ref", "secret://AWS_PROFILE", "--redact=false")
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(stdout), &cfg); err != nil {
+		t.Fatalf("stdout is not one JSON document: %v\n%s", err, stdout)
+	}
+	backend, _ := cfg["backend"].(map[string]any)
 	if backend["credentialsRef"] != "secret://AWS_PROFILE" {
-		t.Errorf("credentialsRef = %v, want the unredacted reference by default", backend["credentialsRef"])
+		t.Errorf("credentialsRef = %v, want the unredacted reference with --redact=false", backend["credentialsRef"])
+	}
+}
+
+// TestConfigCommandRedactRunsBeforeValidate pins the ordering fix:
+// redaction is applied before a --validate failure is reported, so a
+// future Validate() error that echoes a value can never undo --redact's
+// purpose. A redacted credentialsRef still satisfies Validate's
+// secret://-shape check, so --validate must still pass.
+func TestConfigCommandRedactRunsBeforeValidate(t *testing.T) {
+	_, _, err := execute(t, "config", "--validate",
+		"--backend", "agentcore-memory",
+		"--namespace", "prod",
+		"--region", "eu-west-2",
+		"--memory-id", "mem-1",
+		"--credentials-ref", "secret://AWS_PROFILE",
+	)
+	if err != nil {
+		t.Fatalf("config --validate rejected a config whose credentialsRef was redacted before validation: %v", err)
 	}
 }
 
