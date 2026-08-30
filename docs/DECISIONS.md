@@ -198,3 +198,114 @@ exits non-zero rather than falling back to the `memory` backend. Silently
 downgrading to an ephemeral in-process store when a durable backend was
 explicitly requested would be a data-loss trap disguised as
 availability.
+
+## 2026-08-30: security/coverage fix pass
+
+Three review agents (code, security, test-coverage) audited the v1 build
+before it had ever run against real traffic or real AWS. This entry
+records what changed and, briefly, why; `docs/security.md` and
+`SECURITY.md` describe the resulting behaviour, not this pass.
+
+**Namespace isolation was a documented claim the code didn't hold.**
+`RetrieveMemoryRecords`'s `Namespace` parameter is a *prefix* filter per
+the AWS SDK's own doc comment, not an exact match — so namespace `acme`
+silently matched `acme-corp`, contradicting `docs/security.md`'s
+"structural" isolation claim whenever two deployments shared a Memory
+resource with prefix-colliding namespaces. `internal/backend/agentcore.go`
+now binds a single delimited namespace value (`boundNamespace`, appending
+`/`) and uses it for both `CreateEvent`'s `ActorId` (write) and
+`RetrieveMemoryRecords`'s `Namespace` (read), so the two call sites can
+never drift apart, and one namespace can never be a live prefix of
+another. `BilletConfig.Validate` now also requires the namespace to match
+`^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$`, closing the whitespace-typo variant of
+the same gap before it reaches the backend at all. What this does *not*
+newly establish: whether a real AgentCore Memory resource's namespace
+templates actually key records by the raw `actorId` Billet sends — still
+unverified without live AWS access (`TODO.md`, item 1).
+
+**`Validate`'s `credentialsRef` error echoed the value it was
+rejecting**, directly contradicting `SECURITY.md`'s claim that the error
+"never echoes the offending value" (the general pattern was already
+correct in `internal/secret/resolve.go`; this one call site in
+`internal/config/config.go` was not). The error now names the shape of
+the problem, not the value.
+
+**Fail-closed backend construction didn't cover every way "closed"
+should mean "refuses to start."** `awsconfig.LoadDefaultConfig` resolves
+credentials lazily and never validates a region string, so a bad region
+or an absent credential chain used to let `billet serve` start
+successfully and then silently drop every call. Construction now probes
+the resolved credential chain once (`aws.CredentialsProvider.Retrieve`)
+and checks the region against a cheap shape pattern before opening the
+listener. Region *existence* is still not probed — that needs a live AWS
+call, which is out of scope here; the claim in `docs/security.md` is
+scoped accordingly rather than left overstated. Separately, a
+`credentialsRef` that resolves to a nonexistent AWS shared-config profile
+used to propagate the AWS SDK's own error text — which embeds the
+profile name, i.e. the resolved secret value — straight into the startup
+log; that specific error type is now caught and replaced with a generic
+message.
+
+**The MCP endpoint was unbounded in several ordinary ways for an
+unauthenticated service.** `billet serve`'s `http.Server` now sets
+explicit `ReadHeaderTimeout`/`ReadTimeout`/`WriteTimeout`/`IdleTimeout`
+(no slowloris-shaped connection can sit open indefinitely); the
+Streamable HTTP handler sets an explicit `MaxRequestBodyBytes` instead of
+relying on the SDK's default, and `save_memory`'s `content` field has its
+own 256 KiB ceiling, clamped rather than merely documented; the handler
+is wrapped in `http.CrossOriginProtection` (the SDK's own
+`StreamableHTTPOptions.CrossOriginProtection` field is deprecated in
+favour of external wrapping, per the SDK's v1.7.0 doc comment); and
+`DefaultListen` changed from `:8140` to `127.0.0.1:8140`, so exposing the
+unauthenticated endpoint beyond the local machine is an explicit
+`--listen` choice rather than the out-of-the-box behaviour.
+
+**Backend and budget errors reached the MCP caller verbatim.** A failing
+`agentcore-memory` call could return AWS account IDs, role ARNs, resource
+ARNs, and request IDs to whoever could reach the (unauthenticated)
+endpoint; a budget rejection disclosed the exact cap and cumulative call
+count, handing an attacker the exact tuning information needed to exhaust
+it quietly. `internal/mcpserver/server.go` now returns a short, stable,
+generic message for both cases (`"save_memory: backend unavailable"`,
+`"search_memory: backend unavailable"`, `"budget exceeded"`) and logs the
+full detail server-side via `log/slog`. Caller-caused validation errors
+(empty content/query, invalid `kind`, oversized content) are deliberately
+unchanged — they describe the caller's own request, not Billet's
+internals, so there is nothing to protect by genericising them.
+
+**`search_memory`'s `limit` had no upper bound.** A value near or above
+`math.MaxInt32` silently wrapped to a negative `TopK`/`MaxResults` once
+the `agentcore-memory` backend converted it to `int32`. `limit` is now
+clamped to `[1, 100]` in the MCP tool handler before it reaches either
+backend, with a second, backend-local clamp in
+`internal/backend/agentcore.go`'s `Search` as defense in depth for any
+future non-MCP caller of `Backend`.
+
+**`billet config`'s `--redact` defaulted to false and ran after
+`Validate`.** A stray `billet config` in a terminal or log could print a
+live `credentialsRef` in cleartext, and a `--validate` failure was
+reported before redaction had a chance to help. `--redact` now defaults
+to `true` (this deliberately diverges from Stirrup's `run-config
+--redact`, which defaults to `false` — Billet's command is used more
+often for one-off inspection than pipeline composition, and the cost of
+an accidental credential-reference disclosure outweighs the convenience
+of not typing `--redact=false`), and redaction now runs before
+`Validate`. A redacted `credentialsRef` (`secret://[REDACTED]`) still
+satisfies `Validate`'s `secret://`-shape check, so this does not change
+what `--validate` accepts.
+
+**`mcpserver.New`'s "budget must not be nil" was undocumented as
+enforced.** A nil `*cost.Guard` now defaults to an uncapped guard instead
+of panicking on first use — cheap defensive coding for a documented
+precondition nothing previously checked.
+
+**`gosec` is now enabled** in `.golangci.yml`. It flagged three false
+positives in test fixtures (`secret://`-prefixed strings pattern-matching
+as "hardcoded credentials"; a deliberately-0644 test fixture proving the
+file-permission warning it triggers), suppressed inline with `//nolint`
+and a reason, plus a signed-to-unsigned integer conversion in a new
+concurrency test, fixed by using `atomic.Uint64` instead of a manual
+`int64` counter. One finding — `internal/cli/config.go`'s `--config
+<path>` flag reading an operator-supplied local file path (G304,
+"potential file inclusion via variable") — is unrelated to this pass's
+findings and was deliberately left unaddressed; see `TODO.md`.

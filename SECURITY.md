@@ -20,16 +20,22 @@ and the (unauthenticated by default) trust posture of its MCP endpoint.
   backends) at the last moment before use. File-backed secrets whose
   permissions admit group or world access trigger a warning, not a
   failure.
-- `billet config --redact` rewrites `backend.credentialsRef` to
-  `secret://[REDACTED]` for a share-safe config dump.
+- `billet config` rewrites `backend.credentialsRef` to
+  `secret://[REDACTED]` by default; pass `--redact=false` when a
+  pipeline stage genuinely needs the real value.
 
 ## Network
 
 Billet's MCP Streamable HTTP endpoint does not authenticate callers in
 v1 — deploy it behind an ingress or service mesh that terminates
 authenticated TLS (mTLS or equivalent), matching Hairpin's own
-documented trusted-network posture. See
-[`docs/security.md`](docs/security.md#trust-posture-the-mcp-endpoint-is-unauthenticated-by-default).
+documented trusted-network posture. Because of this, the default bind
+address is loopback-only (`127.0.0.1:8140`); exposing it further is an
+explicit `--listen` choice. The endpoint also applies HTTP server
+timeouts, a request body size cap, and CORS/DNS-rebinding protection
+regardless of trust posture. See
+[`docs/security.md`](docs/security.md#trust-posture-the-mcp-endpoint-is-unauthenticated-by-default)
+and [`docs/security.md`](docs/security.md#mcp-endpoint-hardening).
 
 ## Supply chain
 

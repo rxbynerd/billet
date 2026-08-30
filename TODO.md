@@ -30,13 +30,17 @@ To close this out:
    call `search_memory` and confirm records actually come back with
    sensible `content`/`score`/`created_at`.
 4. In particular, verify the `RetrieveMemoryRecords.Namespace` mapping:
-   `internal/backend/agentcore.go` currently passes Billet's
-   `namespace` straight through as the AgentCore namespace filter, on
-   the assumption that the Memory resource's namespace templates use
-   the raw actor id as-is. If the real resource's strategies use a
-   templated namespace (e.g. `/strategies/{strategyId}/actor/{actorId}`),
-   this mapping needs to change — see `docs/DECISIONS.md`, "Backend
-   seam: memory (default) and agentcore-memory".
+   `internal/backend/agentcore.go` binds `boundNamespace(namespace)` (the
+   configured namespace, trimmed, plus a trailing `/`) to both
+   `CreateEvent`'s `ActorId` (write) and `RetrieveMemoryRecords`'s
+   `Namespace` (read), so the two stay internally consistent and one
+   namespace can never prefix-match another. This is still an assumption
+   about how the Memory resource's namespace templates key records by
+   actor id, just now a coherent one — if the real resource's strategies
+   use a templated namespace (e.g.
+   `/strategies/{strategyId}/actor/{actorId}`), this mapping needs to
+   change — see `docs/DECISIONS.md`, "Backend seam: memory (default) and
+   agentcore-memory" and the 2026-08-30 entry.
 
 ## 2. Wire a real Stirrup MCPServerConfig at a running Billet instance
 
@@ -119,3 +123,28 @@ governance: per-call rejection instead of an exit code".
   IaC, outside this repository). Once item 1 is done, it may be worth a
   short doc section on what strategy configuration Billet was actually
   tested against, so a future deployer isn't starting from zero.
+- **AWS region *existence* is still not probed at startup.**
+  `internal/backend/agentcore.go`'s `validRegionShape` only checks that
+  the configured region is shaped like an AWS region (lowercase
+  alphanumeric segments joined by hyphens); it cannot confirm the region
+  actually exists or is reachable without a live AWS call, which is out
+  of scope in this environment (no AWS credentials — see item 1). A
+  region that is shaped correctly but doesn't exist will still only fail
+  on the first real AWS call, not at construction.
+- **`gosec` (enabled in `.golangci.yml` as of the 2026-08-30 fix pass)
+  flags `internal/cli/config.go`'s `os.Open(path)` in `loadBase`** (G304,
+  "potential file inclusion via variable"). `path` is the operator-
+  supplied `--config <path>` flag value, not attacker-controlled input,
+  so this is very likely a false positive — but it's unrelated to the
+  review findings that motivated enabling `gosec`, so it was deliberately
+  left unaddressed (no `//nolint`, no code change) rather than silently
+  dismissed. Revisit if a future session wants a clean `golangci-lint
+  run` with no known-suppressed findings.
+- **`internal/cli.runServe`'s signal-handling/shutdown path is
+  untested.** Nothing exercises the `SIGTERM`/`SIGINT` → graceful
+  `httpServer.Shutdown` path or the `shutdownGrace` timeout in
+  `internal/cli/servecmd.go`. Testing this would need either refactoring
+  `runServe` for injectable signal delivery or an out-of-process test
+  that starts the real binary and sends it a signal; neither was done in
+  the 2026-08-30 fix pass (explicitly out of scope — noted here rather
+  than refactored for testability under time pressure).

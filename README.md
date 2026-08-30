@@ -27,8 +27,8 @@ Requires Go 1.27. Without `just`: `go build -o bin/billet ./cmd/billet`.
 ### The two commands
 
 ```sh
-# Start the MCP server.
-billet serve --listen :8140
+# Start the MCP server (loopback-only default; see the --listen note below).
+billet serve
 
 # Emit the resolved BilletConfig JSON without starting a server.
 billet config --backend agentcore-memory --region eu-west-2 --memory-id mem-abc123
@@ -45,7 +45,7 @@ billet config --backend agentcore-memory --region eu-west-2 --memory-id mem-abc1
     "credentialsRef": "secret://AWS_PROFILE"
   },
   "namespace": "prod",
-  "listen": ":8140",
+  "listen": "127.0.0.1:8140",
   "budget": { "monthlyGbp": 50 }
 }
 ```
@@ -55,11 +55,12 @@ base config (`--config <path>`, `--config -`, or piped stdin) → explicit
 flags. `backend.type` defaults to `"memory"` — an in-process, ephemeral
 store with no external dependencies — so a fresh deployment never talks
 to a billable cloud service by accident. `namespace` is required when
-`backend.type` is `"agentcore-memory"`.
+`backend.type` is `"agentcore-memory"`, and must match
+`^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$`.
 
 | Flag | Config field | Default | Notes |
 | --- | --- | --- | --- |
-| `--listen` | `listen` | `:8140` | MCP Streamable HTTP bind address. |
+| `--listen` | `listen` | `127.0.0.1:8140` | MCP Streamable HTTP bind address. Loopback-only by default — the endpoint is unauthenticated, so exposing it further (`--listen :8140` or a non-loopback address) is an explicit operator choice. |
 | `--namespace` | `namespace` | `default` | Long-term recall scope (AgentCore `actorId`); required for `agentcore-memory`. |
 | `--backend` | `backend.type` | `memory` | `memory` or `agentcore-memory`. |
 | `--region` | `backend.region` | — | AWS region (`agentcore-memory`). |
@@ -70,8 +71,10 @@ to a billable cloud service by accident. `namespace` is required when
 `billet config --validate` checks the resolved config with
 `BilletConfig.Validate` and exits non-zero on failure; without it, a
 partial or chained config is emitted as-is so a pipeline stage can
-complete it downstream. `billet config --redact` rewrites
-`backend.credentialsRef` to `secret://[REDACTED]`.
+complete it downstream. `billet config` redacts `backend.credentialsRef`
+to `secret://[REDACTED]` by default; pass `--redact=false` when a
+pipeline stage genuinely needs the real value to flow through to the next
+stage or to `billet serve`.
 
 ### MCP tools
 
