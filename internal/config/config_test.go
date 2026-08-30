@@ -171,6 +171,61 @@ func TestValidateCredentialsRefMustBeSecretRef(t *testing.T) {
 	}
 }
 
+// TestValidateCredentialsRefErrorNeverEchoesValue pins SECURITY.md's claim
+// that a rejected credentialsRef is never echoed into the error: the
+// offending value may itself be a credential.
+func TestValidateCredentialsRefErrorNeverEchoesValue(t *testing.T) {
+	const literal = "totally-secret-literal-value-12345"
+	cfg := Default()
+	cfg.Backend.Type = BackendAgentCoreMemory
+	cfg.Backend.Region = "eu-west-2"
+	cfg.Backend.MemoryID = "mem-123"
+	cfg.Backend.CredentialsRef = literal
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate accepted a literal credentialsRef")
+	}
+	if strings.Contains(err.Error(), literal) {
+		t.Fatalf("error echoes the literal credentialsRef value: %v", err)
+	}
+}
+
+func TestValidateNamespaceRejectsUnsafeShape(t *testing.T) {
+	tests := []struct {
+		name      string
+		namespace string
+	}{
+		{"too short", "ab"},
+		{"leading hyphen", "-acme"},
+		{"contains whitespace", "acme corp"},
+		{"contains a slash", "acme/corp"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Backend.Type = BackendAgentCoreMemory
+			cfg.Backend.Region = "eu-west-2"
+			cfg.Backend.MemoryID = "mem-123"
+			cfg.Namespace = tt.namespace
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("Validate accepted namespace %q", tt.namespace)
+			}
+		})
+	}
+}
+
+func TestValidateNamespaceAcceptsSafeShape(t *testing.T) {
+	cfg := Default()
+	cfg.Backend.Type = BackendAgentCoreMemory
+	cfg.Backend.Region = "eu-west-2"
+	cfg.Backend.MemoryID = "mem-123"
+	cfg.Namespace = "acme-corp_1"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate rejected a safely-shaped namespace: %v", err)
+	}
+}
+
 func TestValidateNegativeBudgetRejected(t *testing.T) {
 	cfg := Default()
 	cfg.Budget.MonthlyGBP = -1
@@ -242,7 +297,7 @@ func TestApplyFlagsAllFields(t *testing.T) {
 	}
 
 	want := BilletConfig{
-		Backend: BackendConfig{
+		Backend: BackendConfig{ //nolint:gosec // CredentialsRef below is a secret:// reference name, not a literal credential
 			Type:           BackendAgentCoreMemory,
 			Region:         "eu-west-2",
 			MemoryID:       "mem-1",

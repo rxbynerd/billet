@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -25,12 +26,23 @@ const (
 )
 
 // DefaultListen is the address `billet serve` binds when Listen is unset.
-const DefaultListen = ":8140"
+// Loopback-only: exposing beyond localhost (`--listen :8140` or an
+// explicit non-loopback address) is an operator opt-in, not the default,
+// since the MCP endpoint is unauthenticated (docs/security.md).
+const DefaultListen = "127.0.0.1:8140"
 
 // DefaultNamespace is the namespace used when one is not configured and
 // the backend does not require one (the memory backend). agentcore-memory
 // requires an explicit namespace (see Validate).
 const DefaultNamespace = "default"
+
+// namespacePattern bounds the shape of a namespace accepted for the
+// agentcore-memory backend: it must be safe to use, trimmed, as an
+// AgentCore actorId and as a RetrieveMemoryRecords namespace prefix.
+// Rejecting anything outside this shape (in particular, leading/trailing
+// whitespace) closes off a class of typo that would otherwise create a
+// silent isolation gap (docs/DECISIONS.md).
+var namespacePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$`)
 
 // BackendConfig selects and configures the storage backend.
 type BackendConfig struct {
@@ -127,8 +139,12 @@ func (c BilletConfig) Validate() error {
 	switch c.Backend.Type {
 	case "", BackendMemory:
 	case BackendAgentCoreMemory:
-		if strings.TrimSpace(c.Namespace) == "" {
+		ns := strings.TrimSpace(c.Namespace)
+		if ns == "" {
 			return errors.New("namespace: required when backend.type is \"agentcore-memory\" — it is the durable recall scope (AgentCore actorId) and must not be left to a default")
+		}
+		if !namespacePattern.MatchString(ns) {
+			return errors.New("namespace: does not match the required shape ^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$ — this keeps namespace prefixes from colliding under AgentCore's RetrieveMemoryRecords filter")
 		}
 		if strings.TrimSpace(c.Backend.Region) == "" {
 			return errors.New("backend.region: required when backend.type is \"agentcore-memory\"")
@@ -141,7 +157,7 @@ func (c BilletConfig) Validate() error {
 	}
 
 	if c.Backend.CredentialsRef != "" && !strings.HasPrefix(c.Backend.CredentialsRef, "secret://") {
-		return fmt.Errorf("backend.credentialsRef: %q is not a secret:// reference — literal credentials never live in config", c.Backend.CredentialsRef)
+		return errors.New("backend.credentialsRef: not a secret:// reference — literal credentials never live in config")
 	}
 
 	if strings.TrimSpace(c.Listen) == "" {
