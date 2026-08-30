@@ -2,8 +2,6 @@ package backend
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -40,7 +38,7 @@ func NewMemoryBackend() *Memory {
 // Save appends req to the in-process store and returns a newly generated
 // memory ID. Never fails except on an unreadable random source.
 func (m *Memory) Save(_ context.Context, req SaveRequest) (string, error) {
-	id, err := newMemoryID()
+	id, err := randomHexID("mem")
 	if err != nil {
 		return "", fmt.Errorf("memory: generate id: %w", err)
 	}
@@ -131,13 +129,4 @@ func overlapScore(queryTokens []string, content string) float64 {
 		}
 	}
 	return float64(matches) / float64(len(queryTokens))
-}
-
-// newMemoryID returns a random 16-byte hex-encoded identifier.
-func newMemoryID() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return "mem_" + hex.EncodeToString(b), nil
 }
