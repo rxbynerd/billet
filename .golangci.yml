@@ -1,0 +1,16 @@
+# golangci-lint v2 configuration, matching the suite's other repos
+# (Chiron, Stirrup): v2 removed the v1 default exclusions, so this file
+# restores the standard errcheck exclusions explicitly and relaxes
+# errcheck in test files, where httptest handler writes and similar are
+# conventionally unchecked.
+
+version: "2"
+
+linters:
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
