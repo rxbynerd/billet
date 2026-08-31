@@ -13,7 +13,7 @@ import (
 // a default.
 func RegisterFlags(fs *pflag.FlagSet) {
 	d := Default()
-	fs.Bool("mcp", d.MCP.Enabled, "serve the MCP Streamable HTTP endpoint (direct agent-environment access)")
+	fs.Bool("mcp", d.MCP.Enabled, "serve the MCP Streamable HTTP endpoint (direct agent-environment access); disable with --mcp=false")
 	fs.String("listen", d.MCP.Listen, "address the MCP Streamable HTTP endpoint binds")
 	fs.Bool("rpc", d.RPC.Enabled, "serve the billet.v1.MemoryService Connect RPC endpoint (control-plane proxied access)")
 	fs.String("rpc-listen", d.RPC.Listen, "address the Connect RPC endpoint binds")
