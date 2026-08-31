@@ -134,6 +134,17 @@ governance: per-call rejection instead of an exit code".
   IaC, outside this repository). Once item 1 is done, it may be worth a
   short doc section on what strategy configuration Billet was actually
   tested against, so a future deployer isn't starting from zero.
+- **`search_memory` responses have no size cap of their own, on either
+  transport.** Request reads are bounded (1 MiB on both transports,
+  post-decompression on RPC), but a response is bounded only by the
+  existing per-field caps: `limit` (≤100) × `content` (≤256 KiB) allows
+  ~25.6 MiB in the worst case, entirely from content the caller (or a
+  peer on the same namespace) previously stored. Flagged by the
+  2026-08-31 security review as LOW: not a regression, and reaching the
+  worst case requires first storing that much content through the same
+  budget guard — but if Billet ever serves genuinely adversarial
+  callers, a response-byte ceiling (truncating records past it) would
+  belong in `internal/service` so both transports inherit it.
 - **AWS region *existence* is still not probed at startup.**
   `internal/backend/agentcore.go`'s `validRegionShape` only checks that
   the configured region is shaped like an AWS region (lowercase
