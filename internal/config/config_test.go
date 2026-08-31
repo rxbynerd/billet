@@ -16,8 +16,14 @@ func TestDefault(t *testing.T) {
 	if d.Namespace != DefaultNamespace {
 		t.Errorf("Namespace = %q, want %q", d.Namespace, DefaultNamespace)
 	}
-	if d.Listen != DefaultListen {
-		t.Errorf("Listen = %q, want %q", d.Listen, DefaultListen)
+	if !d.MCP.Enabled || d.MCP.Listen != DefaultMCPListen {
+		t.Errorf("MCP = %+v, want enabled on %q", d.MCP, DefaultMCPListen)
+	}
+	if d.RPC.Enabled {
+		t.Errorf("RPC.Enabled = true, want the RPC transport off by default")
+	}
+	if d.RPC.Listen != DefaultRPCListen {
+		t.Errorf("RPC.Listen = %q, want %q pre-filled so enabling is a one-key change", d.RPC.Listen, DefaultRPCListen)
 	}
 	if d.Budget.MonthlyGBP != 0 {
 		t.Errorf("Budget.MonthlyGBP = %v, want 0 (uncapped)", d.Budget.MonthlyGBP)
@@ -41,7 +47,8 @@ func TestDecodeJSONRoundtrip(t *testing.T) {
 	input := `{
 		"backend": {"type": "agentcore-memory", "region": "eu-west-2", "memoryId": "mem-123", "credentialsRef": "secret://AWS_PROFILE"},
 		"namespace": "prod",
-		"listen": ":9000",
+		"mcp": {"enabled": true, "listen": ":9000"},
+		"rpc": {"enabled": true, "listen": ":9001"},
 		"budget": {"monthlyGbp": 50}
 	}`
 	cfg, err := Decode(strings.NewReader(input))
@@ -63,8 +70,11 @@ func TestDecodeJSONRoundtrip(t *testing.T) {
 	if cfg.Namespace != "prod" {
 		t.Errorf("Namespace = %q", cfg.Namespace)
 	}
-	if cfg.Listen != ":9000" {
-		t.Errorf("Listen = %q", cfg.Listen)
+	if cfg.MCP.Listen != ":9000" {
+		t.Errorf("MCP.Listen = %q", cfg.MCP.Listen)
+	}
+	if !cfg.RPC.Enabled || cfg.RPC.Listen != ":9001" {
+		t.Errorf("RPC = %+v, want enabled on :9001", cfg.RPC)
 	}
 	if cfg.Budget.MonthlyGBP != 50 {
 		t.Errorf("Budget.MonthlyGBP = %v", cfg.Budget.MonthlyGBP)
@@ -101,8 +111,11 @@ func TestDecodePartialOverlaysDefaults(t *testing.T) {
 	if cfg.Namespace != "custom" {
 		t.Errorf("Namespace = %q, want custom", cfg.Namespace)
 	}
-	if cfg.Listen != DefaultListen {
-		t.Errorf("Listen = %q, want default %q to survive a partial overlay", cfg.Listen, DefaultListen)
+	if cfg.MCP.Listen != DefaultMCPListen {
+		t.Errorf("MCP.Listen = %q, want default %q to survive a partial overlay", cfg.MCP.Listen, DefaultMCPListen)
+	}
+	if !cfg.MCP.Enabled {
+		t.Error("MCP.Enabled = false, want the default true to survive a partial overlay")
 	}
 	if cfg.Backend.Type != BackendMemory {
 		t.Errorf("Backend.Type = %q, want default %q to survive a partial overlay", cfg.Backend.Type, BackendMemory)
@@ -234,11 +247,61 @@ func TestValidateNegativeBudgetRejected(t *testing.T) {
 	}
 }
 
-func TestValidateEmptyListenRejected(t *testing.T) {
-	cfg := Default()
-	cfg.Listen = ""
-	if err := cfg.Validate(); err == nil {
-		t.Fatal("Validate accepted an empty listen address")
+func TestValidateTransportRules(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*BilletConfig)
+		wantErr bool
+	}{
+		{"empty mcp listen while enabled", func(c *BilletConfig) {
+			c.MCP.Listen = ""
+		}, true},
+		{"empty rpc listen while enabled", func(c *BilletConfig) {
+			c.RPC.Enabled = true
+			c.RPC.Listen = ""
+		}, true},
+		{"no transport enabled", func(c *BilletConfig) {
+			c.MCP.Enabled = false
+			c.RPC.Enabled = false
+		}, true},
+		{"both transports on one address", func(c *BilletConfig) {
+			c.RPC.Enabled = true
+			c.RPC.Listen = c.MCP.Listen
+		}, true},
+		{"rpc only", func(c *BilletConfig) {
+			c.MCP.Enabled = false
+			c.RPC.Enabled = true
+		}, false},
+		{"both on distinct addresses", func(c *BilletConfig) {
+			c.RPC.Enabled = true
+		}, false},
+		{"disabled mcp may have an empty listen", func(c *BilletConfig) {
+			c.MCP.Enabled = false
+			c.MCP.Listen = ""
+			c.RPC.Enabled = true
+		}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Default()
+			tt.mutate(&cfg)
+			err := cfg.Validate()
+			if tt.wantErr && err == nil {
+				t.Fatal("Validate accepted an invalid transport config")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("Validate rejected a valid transport config: %v", err)
+			}
+		})
+	}
+}
+
+// TestDecodeLegacyListenKeyRejected pins the loud failure mode for
+// configs written against the single-transport surface: the top-level
+// listen key no longer exists and must error, not silently vanish.
+func TestDecodeLegacyListenKeyRejected(t *testing.T) {
+	if _, err := Decode(strings.NewReader(`{"listen": ":9000"}`)); err == nil {
+		t.Fatal("Decode accepted the removed top-level listen key")
 	}
 }
 
@@ -268,8 +331,8 @@ func TestApplyFlagsOverlaysOnlySetFlags(t *testing.T) {
 		t.Fatalf("ApplyFlags: %v", err)
 	}
 
-	if base.Listen != ":9999" {
-		t.Errorf("Listen = %q, want :9999 (explicit flag)", base.Listen)
+	if base.MCP.Listen != ":9999" {
+		t.Errorf("MCP.Listen = %q, want :9999 (explicit flag)", base.MCP.Listen)
 	}
 	if base.Namespace != "from-base-config" {
 		t.Errorf("Namespace = %q, want base config value to survive (flag not set)", base.Namespace)
@@ -281,7 +344,10 @@ func TestApplyFlagsAllFields(t *testing.T) {
 	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	RegisterFlags(fs)
 	args := []string{
+		"--mcp=false",
 		"--listen", ":1234",
+		"--rpc",
+		"--rpc-listen", ":4321",
 		"--namespace", "ns",
 		"--backend", "agentcore-memory",
 		"--region", "eu-west-2",
@@ -304,7 +370,8 @@ func TestApplyFlagsAllFields(t *testing.T) {
 			CredentialsRef: "secret://AWS_PROFILE",
 		},
 		Namespace: "ns",
-		Listen:    ":1234",
+		MCP:       TransportConfig{Enabled: false, Listen: ":1234"},
+		RPC:       TransportConfig{Enabled: true, Listen: ":4321"},
 		Budget:    BudgetConfig{MonthlyGBP: 12.5},
 	}
 	if cfg != want {

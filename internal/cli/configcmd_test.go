@@ -66,7 +66,7 @@ func TestConfigCommandMalformedFile(t *testing.T) {
 
 func TestConfigCommandFlagsOverrideBase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "base.json")
-	if err := os.WriteFile(path, []byte(`{"namespace": "from-file", "listen": ":1"}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"namespace": "from-file", "mcp": {"enabled": true, "listen": ":1"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -81,8 +81,9 @@ func TestConfigCommandFlagsOverrideBase(t *testing.T) {
 	if cfg["namespace"] != "from-flag" {
 		t.Errorf("namespace = %v, want the explicit flag to win", cfg["namespace"])
 	}
-	if cfg["listen"] != ":1" {
-		t.Errorf("listen = %v, want the base file's value to survive (flag not set)", cfg["listen"])
+	mcp, _ := cfg["mcp"].(map[string]any)
+	if mcp["listen"] != ":1" {
+		t.Errorf("mcp.listen = %v, want the base file's value to survive (flag not set)", mcp["listen"])
 	}
 }
 

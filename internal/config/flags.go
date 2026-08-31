@@ -13,7 +13,10 @@ import (
 // a default.
 func RegisterFlags(fs *pflag.FlagSet) {
 	d := Default()
-	fs.String("listen", d.Listen, "address the MCP Streamable HTTP endpoint binds")
+	fs.Bool("mcp", d.MCP.Enabled, "serve the MCP Streamable HTTP endpoint (direct agent-environment access)")
+	fs.String("listen", d.MCP.Listen, "address the MCP Streamable HTTP endpoint binds")
+	fs.Bool("rpc", d.RPC.Enabled, "serve the billet.v1.MemoryService Connect RPC endpoint (control-plane proxied access)")
+	fs.String("rpc-listen", d.RPC.Listen, "address the Connect RPC endpoint binds")
 	fs.String("namespace", d.Namespace, "long-term recall scope (AgentCore actorId); required for the agentcore-memory backend")
 	fs.String("backend", d.Backend.Type, fmt.Sprintf("backend type: %q or %q", BackendMemory, BackendAgentCoreMemory))
 	fs.String("region", "", "AWS region (agentcore-memory backend)")
@@ -28,8 +31,14 @@ func RegisterFlags(fs *pflag.FlagSet) {
 func ApplyFlags(cfg *BilletConfig, fs *pflag.FlagSet) error {
 	fs.Visit(func(f *pflag.Flag) {
 		switch f.Name {
+		case "mcp":
+			cfg.MCP.Enabled, _ = fs.GetBool(f.Name)
 		case "listen":
-			cfg.Listen, _ = fs.GetString(f.Name)
+			cfg.MCP.Listen, _ = fs.GetString(f.Name)
+		case "rpc":
+			cfg.RPC.Enabled, _ = fs.GetBool(f.Name)
+		case "rpc-listen":
+			cfg.RPC.Listen, _ = fs.GetString(f.Name)
 		case "namespace":
 			cfg.Namespace, _ = fs.GetString(f.Name)
 		case "backend":

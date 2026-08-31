@@ -17,6 +17,7 @@ import (
 	"github.com/rxbynerd/billet/internal/config"
 	"github.com/rxbynerd/billet/internal/cost"
 	"github.com/rxbynerd/billet/internal/mcpserver"
+	"github.com/rxbynerd/billet/internal/rpcserver"
 	"github.com/rxbynerd/billet/internal/secret"
 	"github.com/rxbynerd/billet/internal/service"
 )
@@ -25,10 +26,11 @@ import (
 // requests to finish after a shutdown signal.
 const shutdownGrace = 10 * time.Second
 
-// HTTP server timeouts. The MCP endpoint is unauthenticated by default
-// (docs/security.md), so bounding how long a connection may sit idle or
-// trickle in headers/a body matters: without these, a slow client (or a
-// deliberate slowloris) can hold a connection open indefinitely.
+// HTTP server timeouts, applied to both transports' listeners. The
+// endpoints are unauthenticated by default (docs/security.md), so
+// bounding how long a connection may sit idle or trickle in headers/a
+// body matters: without these, a slow client (or a deliberate
+// slowloris) can hold a connection open indefinitely.
 const (
 	readHeaderTimeout = 5 * time.Second
 	readTimeout       = 30 * time.Second
@@ -39,9 +41,12 @@ const (
 func newServeCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "serve",
-		Short: "Start the Billet MCP server",
-		Long: `Start the MCP Streamable HTTP server exposing save_memory and
-search_memory, backed by the configured storage backend.
+		Short: "Start the Billet server",
+		Long: `Start the server exposing save_memory and search_memory, backed by
+the configured storage backend, on the enabled transports: MCP
+Streamable HTTP (--mcp, default on) for direct agent-environment
+access, and/or billet.v1.MemoryService Connect RPC (--rpc, default off)
+for control-plane-proxied access.
 
 Fails closed: if backend.type names a real backend (agentcore-memory)
 and it cannot be constructed (bad credentials, unreachable region, and
@@ -97,39 +102,77 @@ func runServe(cmd *cobra.Command, cfg config.BilletConfig) error {
 	}
 
 	guard := cost.NewGuard(cfg.Budget.MonthlyGBP, os.Stderr)
-	srv := mcpserver.New(service.New(b, guard))
+	svc := service.New(b, guard)
 
-	httpServer := &http.Server{
-		Addr:              cfg.Listen,
-		Handler:           srv.Handler(),
-		ReadHeaderTimeout: readHeaderTimeout,
-		ReadTimeout:       readTimeout,
-		WriteTimeout:      writeTimeout,
-		IdleTimeout:       idleTimeout,
+	// One http.Server per enabled transport: separate listeners let the
+	// two deployment models expose different network surfaces
+	// (docs/DECISIONS.md, "two transports"). The service (and so the
+	// cost guard) is shared, so the budget gates total calls across both.
+	type transport struct {
+		name   string
+		server *http.Server
+	}
+	var transports []transport
+	if cfg.MCP.Enabled {
+		transports = append(transports, transport{name: "mcp", server: &http.Server{
+			Addr:              cfg.MCP.Listen,
+			Handler:           mcpserver.New(svc).Handler(),
+			ReadHeaderTimeout: readHeaderTimeout,
+			ReadTimeout:       readTimeout,
+			WriteTimeout:      writeTimeout,
+			IdleTimeout:       idleTimeout,
+		}})
+	}
+	if cfg.RPC.Enabled {
+		transports = append(transports, transport{name: "rpc", server: &http.Server{
+			Addr:              cfg.RPC.Listen,
+			Handler:           rpcserver.New(svc).Handler(),
+			// Cleartext gRPC needs unencrypted HTTP/2.
+			Protocols:         rpcserver.Protocols(),
+			ReadHeaderTimeout: readHeaderTimeout,
+			ReadTimeout:       readTimeout,
+			WriteTimeout:      writeTimeout,
+			IdleTimeout:       idleTimeout,
+		}})
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		logger.Info("billet serving",
-			"listen", cfg.Listen, "backend", cfg.Backend.Type, "namespace", cfg.Namespace)
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-		}
-	}()
+	logger.Info("billet serving",
+		"backend", cfg.Backend.Type, "namespace", cfg.Namespace,
+		"mcp", listenOrDisabled(cfg.MCP), "rpc", listenOrDisabled(cfg.RPC))
+
+	errCh := make(chan error, len(transports))
+	for _, tr := range transports {
+		go func() {
+			if err := tr.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("%s listener: %w", tr.name, err)
+			}
+		}()
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	var serveErr error
 	select {
-	case err := <-errCh:
-		return err
+	case serveErr = <-errCh:
+		logger.Error("listener failed; shutting down", "error", serveErr)
 	case sig := <-sigCh:
 		logger.Info("shutting down", "signal", sig.String())
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
 	defer cancel()
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		logger.Warn("shutdown grace expired with requests still in flight", "error", err)
+	for _, tr := range transports {
+		if err := tr.server.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("shutdown grace expired with requests still in flight",
+				"transport", tr.name, "error", err)
+		}
 	}
-	return nil
+	return serveErr
+}
+
+func listenOrDisabled(t config.TransportConfig) string {
+	if !t.Enabled {
+		return "disabled"
+	}
+	return t.Listen
 }

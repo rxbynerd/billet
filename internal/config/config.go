@@ -25,11 +25,14 @@ const (
 	BackendAgentCoreMemory = "agentcore-memory"
 )
 
-// DefaultListen is the address `billet serve` binds when Listen is unset.
-// Loopback-only: exposing beyond localhost (`--listen :8140` or an
-// explicit non-loopback address) is an operator opt-in, not the default,
-// since the MCP endpoint is unauthenticated (docs/security.md).
-const DefaultListen = "127.0.0.1:8140"
+// Default listen addresses for the two transports. Loopback-only:
+// exposing an endpoint beyond localhost (`--listen :8140` or an explicit
+// non-loopback address) is an operator opt-in, not the default, since
+// both endpoints are unauthenticated (docs/security.md).
+const (
+	DefaultMCPListen = "127.0.0.1:8140"
+	DefaultRPCListen = "127.0.0.1:8141"
+)
 
 // DefaultNamespace is the namespace used when one is not configured and
 // the backend does not require one (the memory backend). agentcore-memory
@@ -61,6 +64,21 @@ type BackendConfig struct {
 	CredentialsRef string `json:"credentialsRef,omitempty" yaml:"credentialsRef,omitempty"`
 }
 
+// TransportConfig configures one of Billet's two transports. Each
+// enabled transport binds its own listener, so the two deployment
+// models can expose different network surfaces: MCP reachable from the
+// agent environment (direct model), or RPC reachable only by the
+// control plane (proxied model), or both.
+type TransportConfig struct {
+	// Enabled controls whether `billet serve` binds this transport.
+	// Serialised without omitempty on purpose: a piped `billet config`
+	// output must carry an explicit false rather than re-defaulting
+	// downstream.
+	Enabled bool `json:"enabled" yaml:"enabled"`
+	// Listen is the address this transport binds when enabled.
+	Listen string `json:"listen,omitempty" yaml:"listen,omitempty"`
+}
+
 // BudgetConfig bounds the rough, call-count-based cost estimate (see
 // internal/cost); it is not tied to real AgentCore billing in v1.
 type BudgetConfig struct {
@@ -77,19 +95,25 @@ type BilletConfig struct {
 	// long-term recall scope (AgentCore's actorId). Bound once at
 	// startup, never accepted from a caller (docs/DECISIONS.md).
 	Namespace string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-	// Listen is the address `billet serve` binds for the MCP Streamable
-	// HTTP endpoint.
-	Listen string `json:"listen,omitempty" yaml:"listen,omitempty"`
-	Budget BudgetConfig `json:"budget,omitempty" yaml:"budget,omitempty"`
+	// MCP is the MCP Streamable HTTP transport (direct agent-environment
+	// access, Stirrup's path). Enabled by default.
+	MCP TransportConfig `json:"mcp" yaml:"mcp"`
+	// RPC is the billet.v1.MemoryService Connect RPC transport
+	// (control-plane-proxied access). Disabled by default.
+	RPC    TransportConfig `json:"rpc" yaml:"rpc"`
+	Budget BudgetConfig    `json:"budget,omitempty" yaml:"budget,omitempty"`
 }
 
 // Default returns the documented defaults: an in-process memory backend,
-// namespace "default", listening on DefaultListen, uncapped budget.
+// namespace "default", the MCP transport enabled on DefaultMCPListen,
+// the RPC transport disabled (its listen address pre-filled with
+// DefaultRPCListen so enabling it is a one-key change), uncapped budget.
 func Default() BilletConfig {
 	return BilletConfig{
 		Backend:   BackendConfig{Type: BackendMemory},
 		Namespace: DefaultNamespace,
-		Listen:    DefaultListen,
+		MCP:       TransportConfig{Enabled: true, Listen: DefaultMCPListen},
+		RPC:       TransportConfig{Enabled: false, Listen: DefaultRPCListen},
 	}
 }
 
@@ -160,8 +184,17 @@ func (c BilletConfig) Validate() error {
 		return errors.New("backend.credentialsRef: not a secret:// reference — literal credentials never live in config")
 	}
 
-	if strings.TrimSpace(c.Listen) == "" {
-		return errors.New("listen: must not be empty")
+	if !c.MCP.Enabled && !c.RPC.Enabled {
+		return errors.New("mcp.enabled/rpc.enabled: at least one transport must be enabled — a Billet with neither serves nothing")
+	}
+	if c.MCP.Enabled && strings.TrimSpace(c.MCP.Listen) == "" {
+		return errors.New("mcp.listen: must not be empty when mcp.enabled is true")
+	}
+	if c.RPC.Enabled && strings.TrimSpace(c.RPC.Listen) == "" {
+		return errors.New("rpc.listen: must not be empty when rpc.enabled is true")
+	}
+	if c.MCP.Enabled && c.RPC.Enabled && strings.TrimSpace(c.MCP.Listen) == strings.TrimSpace(c.RPC.Listen) {
+		return errors.New("mcp.listen/rpc.listen: the two transports bind separate listeners and must not share an address")
 	}
 
 	if c.Budget.MonthlyGBP < 0 {
