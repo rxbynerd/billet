@@ -15,6 +15,7 @@ import (
 
 	"github.com/rxbynerd/billet/internal/backend"
 	"github.com/rxbynerd/billet/internal/cost"
+	"github.com/rxbynerd/billet/internal/service"
 )
 
 // erroringBackend always fails, so tests can assert on how a backend
@@ -62,7 +63,7 @@ func newTestServer(t *testing.T, budget *cost.Guard) *httptest.Server {
 	if budget == nil {
 		budget = cost.NewGuard(0, &bytes.Buffer{})
 	}
-	s := New(backend.NewMemoryBackend(), budget)
+	s := New(service.New(backend.NewMemoryBackend(), budget))
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	return ts
@@ -262,7 +263,7 @@ func TestStirrupCompatibleRawJSONRPC(t *testing.T) {
 // unauthenticated MCP caller sees.
 func TestSaveMemoryBackendErrorReturnsGenericMessage(t *testing.T) {
 	const internalDetail = "AccessDeniedException: arn:aws:iam::123456789012:role/billet is not authorized (RequestId: abc-123)"
-	s := New(erroringBackend{err: errors.New(internalDetail)}, cost.NewGuard(0, &bytes.Buffer{}))
+	s := New(service.New(erroringBackend{err: errors.New(internalDetail)}, cost.NewGuard(0, &bytes.Buffer{})))
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	ctx := context.Background()
@@ -294,7 +295,7 @@ func TestSaveMemoryBackendErrorReturnsGenericMessage(t *testing.T) {
 
 func TestSearchMemoryBackendErrorReturnsGenericMessage(t *testing.T) {
 	const internalDetail = "ThrottlingException: rate exceeded for request id def-456"
-	s := New(erroringBackend{err: errors.New(internalDetail)}, cost.NewGuard(0, &bytes.Buffer{}))
+	s := New(service.New(erroringBackend{err: errors.New(internalDetail)}, cost.NewGuard(0, &bytes.Buffer{})))
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	ctx := context.Background()
@@ -376,7 +377,7 @@ func TestSaveMemoryRejectsOversizedContent(t *testing.T) {
 	}
 	defer session.Close()
 
-	oversized := strings.Repeat("a", maxContentBytes+1)
+	oversized := strings.Repeat("a", service.MaxContentBytes+1)
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{
 		Name:      "save_memory",
 		Arguments: map[string]any{"content": oversized},
@@ -394,7 +395,7 @@ func TestSaveMemoryRejectsOversizedContent(t *testing.T) {
 // TopK/MaxResults) if forwarded unclamped.
 func TestSearchMemoryClampsLimitToMax(t *testing.T) {
 	rec := &recordingBackend{}
-	s := New(rec, cost.NewGuard(0, &bytes.Buffer{}))
+	s := New(service.New(rec, cost.NewGuard(0, &bytes.Buffer{})))
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	ctx := context.Background()
@@ -416,8 +417,8 @@ func TestSearchMemoryClampsLimitToMax(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("search_memory rejected an oversized limit instead of clamping it: %+v", result.Content)
 	}
-	if got := rec.lastLimit(); got != maxSearchLimit {
-		t.Errorf("Limit forwarded to the backend = %d, want the %d ceiling", got, maxSearchLimit)
+	if got := rec.lastLimit(); got != service.MaxSearchLimit {
+		t.Errorf("Limit forwarded to the backend = %d, want the %d ceiling", got, service.MaxSearchLimit)
 	}
 }
 
@@ -425,7 +426,7 @@ func TestSearchMemoryClampsLimitToMax(t *testing.T) {
 // default: a future caller passing nil must get an uncapped guard, not a
 // panic on the first save_memory/search_memory call.
 func TestNewWithNilBudgetDoesNotPanic(t *testing.T) {
-	s := New(backend.NewMemoryBackend(), nil)
+	s := New(service.New(backend.NewMemoryBackend(), nil))
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 	ctx := context.Background()

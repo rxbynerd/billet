@@ -18,6 +18,7 @@ import (
 	"github.com/rxbynerd/billet/internal/cost"
 	"github.com/rxbynerd/billet/internal/mcpserver"
 	"github.com/rxbynerd/billet/internal/secret"
+	"github.com/rxbynerd/billet/internal/service"
 )
 
 // shutdownGrace bounds how long `billet serve` waits for in-flight
@@ -96,7 +97,7 @@ func runServe(cmd *cobra.Command, cfg config.BilletConfig) error {
 	}
 
 	guard := cost.NewGuard(cfg.Budget.MonthlyGBP, os.Stderr)
-	srv := mcpserver.New(b, guard)
+	srv := mcpserver.New(service.New(b, guard))
 
 	httpServer := &http.Server{
 		Addr:              cfg.Listen,
