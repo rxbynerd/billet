@@ -97,19 +97,24 @@ the point of the tool).
   `shutting down`, backend-construction failures) log configuration
   (listen address, backend type, namespace) and error text, never tool
   call arguments.
-- `internal/mcpserver` logs a tool call's outcome, not its content: a
-  budget-guard rejection or a `Save`/`Search` failure is logged
-  server-side via `log/slog` with the full error detail (which, for the
-  `agentcore-memory` backend, can include AWS account IDs, role ARNs,
-  resource ARNs, and request IDs), while the MCP caller receives only a
-  short, stable, generic message (`"save_memory: backend unavailable"`,
-  `"search_memory: backend unavailable"`, `"budget exceeded"`) —
-  `TestSaveMemoryBackendErrorReturnsGenericMessage`,
+- `internal/service` (shared by both transports) logs a tool call's
+  outcome, not its content: a budget-guard rejection or a
+  `Save`/`Search` failure is logged server-side via `log/slog` with the
+  full error detail (which, for the `agentcore-memory` backend, can
+  include AWS account IDs, role ARNs, resource ARNs, and request IDs),
+  while the caller receives only a short, stable, generic message
+  (`"save_memory: backend unavailable"`, `"search_memory: backend
+  unavailable"`, `"budget exceeded"`) — as an MCP tool error on the MCP
+  transport, or as an `UNAVAILABLE`/`RESOURCE_EXHAUSTED` status on the
+  RPC transport. `TestSaveMemoryBackendErrorReturnsGenericMessage`,
   `TestSearchMemoryBackendErrorReturnsGenericMessage`, and
-  `TestBudgetExceededMessageDoesNotLeakDetail` pin this. Caller-caused
-  validation errors (empty content, empty query, an invalid `kind`,
-  oversized content) are unaffected and remain specific, since they
-  describe the caller's own request rather than Billet's internals.
+  `TestBudgetExceededMessageDoesNotLeakDetail` (MCP) and
+  `TestBackendErrorMapsToUnavailableGeneric`,
+  `TestBudgetExceededMapsToResourceExhausted` (RPC) pin this.
+  Caller-caused validation errors (empty content, empty query, an
+  invalid `kind`, oversized content) are unaffected and remain
+  specific, since they describe the caller's own request rather than
+  Billet's internals.
 
 The `agentcore-memory` backend's request-shaping tests
 (`internal/backend/agentcore_test.go`) assert on request structure sent
@@ -118,21 +123,30 @@ is for) — this is the one place content legitimately leaves the
 process, over the AWS SDK's TLS-protected SigV4-signed connection, going
 to the backend that was explicitly configured to store it.
 
-## Trust posture: the MCP endpoint is unauthenticated by default
+## Trust posture: both endpoints are unauthenticated by default
 
-Billet's MCP Streamable HTTP endpoint does not authenticate or authorize
-callers in v1 — matching Hairpin's own documented trusted-network
-posture (`hairpin/README.md`/`docs/design.md`: "keep the Service on a
-trusted network and terminate authenticated TLS at an ingress or use
-mesh mTLS before exposing it outside the cluster"). Anyone who can reach
-`BilletConfig.listen` can call `save_memory` and `search_memory` for the
-configured namespace.
+Neither of Billet's endpoints — the MCP Streamable HTTP transport nor
+the `billet.v1.MemoryService` Connect RPC transport — authenticates or
+authorizes callers in v1, matching Hairpin's own documented
+trusted-network posture (`hairpin/README.md`/`docs/design.md`: "keep the
+Service on a trusted network and terminate authenticated TLS at an
+ingress or use mesh mTLS before exposing it outside the cluster").
+Anyone who can reach an enabled listener can call `save_memory` and
+`search_memory` for the configured namespace.
 
-Because there is no authentication layer, `BilletConfig.listen` defaults
-to `127.0.0.1:8140` — loopback-only. Exposing Billet beyond the local
-machine (`--listen :8140`, `0.0.0.0:8140`, or any other non-loopback
-address) is an explicit operator choice, not something a fresh,
-unconfigured deployment does by accident.
+Because there is no authentication layer, both listen addresses default
+to loopback (`mcp.listen` `127.0.0.1:8140`, `rpc.listen`
+`127.0.0.1:8141`). Exposing either beyond the local machine (`--listen
+:8140`, `0.0.0.0`, or any other non-loopback address) is an explicit
+operator choice, not something a fresh, unconfigured deployment does by
+accident.
+
+The two transports bind separate listeners precisely so their network
+exposure can differ: in the control-plane-proxied deployment model
+(`--rpc --mcp=false`), the agent environment has no network path to
+Billet at all — only the control plane does — which is itself a
+meaningful access-control boundary even before any ingress-level
+authentication is added.
 
 Recommended mitigation, same as Hairpin's: put Billet behind an ingress
 or service mesh that terminates mTLS (or equivalent authenticated TLS)
@@ -142,26 +156,32 @@ small and matches the rest of the suite's posture — Stirrup's
 `types.MCPServerConfig.APIKeyRef` supports a bearer token if a specific
 deployment needs one, but Billet does not require or default to one.
 
-## MCP endpoint hardening
+## Endpoint hardening
 
-A handful of protections apply regardless of the trust posture above,
-because "unauthenticated by default" should not also mean "unbounded":
+A handful of protections apply to both transports regardless of the
+trust posture above, because "unauthenticated by default" should not
+also mean "unbounded":
 
-- **HTTP server timeouts.** `billet serve`'s `http.Server` sets
+- **HTTP server timeouts.** Each of `billet serve`'s listeners sets
   `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout`, and `IdleTimeout`
   explicitly (`internal/cli/servecmd.go`), so a slow or stalled client
   (deliberate or not) cannot hold a connection open indefinitely.
 - **Request body and content size limits.** The Streamable HTTP handler
   sets an explicit `MaxRequestBodyBytes` (1 MiB) rather than relying on
-  the SDK's current default, and `save_memory`'s `content` field is
-  separately capped at 256 KiB, returned as an ordinary validation error
-  when exceeded — the length limit is caller-facing information, not an
-  internal detail.
-- **CORS/DNS-rebinding protection.** The handler is wrapped with
+  the SDK's current default; the RPC handler sets the equivalent
+  `connect.WithReadMaxBytes` (1 MiB); and `save_memory`'s `content`
+  field is separately capped at 256 KiB in the shared service, returned
+  as an ordinary validation error when exceeded — the length limit is
+  caller-facing information, not an internal detail.
+- **CORS/DNS-rebinding protection.** Both handlers are wrapped with
   `http.CrossOriginProtection`, rejecting a cross-origin browser request
-  before it reaches any tool. The MCP SDK also auto-enables Host-header
-  DNS-rebinding protection for a loopback bind unless explicitly
-  disabled.
+  before it reaches any tool (pinned per transport by the two
+  `TestCrossOriginRequestsAreRejected` tests). The MCP SDK also
+  auto-enables Host-header DNS-rebinding protection for a loopback bind
+  unless explicitly disabled.
+- **Unencrypted HTTP/2 is scoped to the RPC listener.** Cleartext gRPC
+  requires it there (`rpcserver.Protocols()`); the MCP listener does not
+  enable it.
 - **Generic errors on the wire.** A backend failure (from `Save` or
   `Search`) or a budget-guard rejection never reaches the caller with its
   internal detail intact — see "Content logging and error detail" below.

@@ -46,7 +46,13 @@ just ci      # everything CI runs
   session parameter on `Save`/`Search` — those are bound at
   construction from `BilletConfig`. Do not add them back as call
   parameters; that would let the calling LLM choose which tenant's
-  memory it touches (see `docs/DECISIONS.md`).
+  memory it touches (see `docs/DECISIONS.md`). The same rule holds on
+  the wire for both transports: no namespace/session field on the MCP
+  tools or in `proto/billet/v1/memory.proto`.
+- Tool semantics (validation, limits, budget gating, error policy) live
+  only in `internal/service`; the transport packages are protocol
+  adapters and must not grow behaviour of their own, or the two
+  transports drift.
 - Billet fails closed on backend construction failure: if
   `agentcore-memory` is configured and fails to construct, `billet
   serve` must exit non-zero, never fall back to the `memory` backend.

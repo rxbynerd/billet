@@ -15,6 +15,11 @@ is `github.com/rxbynerd/billet`; the binary is `billet`.
 
 ## Transport: MCP server over Streamable HTTP, not connect-go/gRPC
 
+> Partially superseded by the 2026-08-31 "two transports" entry below:
+> MCP remains the default, Stirrup-facing transport, but a Connect RPC
+> transport was added for control-plane-proxied deployments, and the
+> proposal's protobuf contract was reinstated in adapted form.
+
 The proposal's open question #1 asked whether Stirrup's tool-calling
 loop shells out to a CLI or dials a persistent RPC sidecar. The answer,
 read directly from `harness/internal/mcp/client.go` and
@@ -309,3 +314,66 @@ concurrency test, fixed by using `atomic.Uint64` instead of a manual
 <path>` flag reading an operator-supplied local file path (G304,
 "potential file inclusion via variable") — is unrelated to this pass's
 findings and was deliberately left unaddressed; see `TODO.md`.
+
+## 2026-08-31: Two transports — direct MCP and control-plane-proxied RPC
+
+The original transport decision (above) dropped the proposal's
+connect-go/gRPC sketch entirely because Stirrup's only external-tool
+mechanism is a remote MCP client. That answered "how does Stirrup call
+Billet?" but silently fixed a second, separate question: "who is allowed
+to reach Billet's network endpoint?" Serving MCP directly means the
+Stirrup agent environment itself needs network access to Billet — the
+agent is the client. The rest of the Equestrianism toolset instead
+expects a control plane to proxy tool calls to the knowledge system over
+RPC, so the agent environment never gets a network path to it.
+
+Billet now supports both deployment models rather than forcing the
+choice:
+
+- **Direct (default):** the MCP Streamable HTTP endpoint
+  (`mcp.enabled`, default true, `mcp.listen` default `127.0.0.1:8140`)
+  is reachable from the agent environment and Stirrup calls it as
+  before. This showcases the minimal-integration path.
+- **Proxied:** the Connect RPC endpoint (`rpc.enabled`, default false,
+  `rpc.listen` default `127.0.0.1:8141`) serves
+  `billet.v1.MemoryService` (Connect, gRPC, and gRPC-Web protocols via
+  connect-go), and the control plane proxies `save_memory`/
+  `search_memory` to it; `mcp.enabled: false` removes the direct
+  surface entirely. This highlights Stirrup's
+  no-direct-network-access-for-agents security posture while staying
+  compatible with the rest of the toolset.
+- Both can be enabled at once (dev/compat); they bind separate
+  listeners so the two surfaces can face different networks, and they
+  share one `internal/service` core and one cost guard, so semantics
+  and budget are identical regardless of the path a call takes.
+
+Consequences of note:
+
+- The proposal's protobuf scaffolding is reinstated in adapted form:
+  `proto/billet/v1/memory.proto`, generated via buf into the public
+  `gen/` tree (committed, so builds need neither buf nor network;
+  plugins pinned as go.mod tool directives; `just proto` regenerates).
+  `gen/` is public so the control plane can import the client stubs.
+  Unlike the proposal's sketch, the contract carries no `session_id` or
+  `namespace` field — the no-caller-supplied-identity rule (above)
+  applies to both transports identically.
+- Tool semantics moved from `internal/mcpserver` into
+  `internal/service`; the transport packages are pure protocol
+  adapters. Error policy maps per transport: caller-caused validation
+  errors are MCP tool errors / `INVALID_ARGUMENT`; budget rejections
+  are `"budget exceeded"` / `RESOURCE_EXHAUSTED`; backend failures are
+  the generic unavailable message / `UNAVAILABLE`.
+- Cleartext gRPC (no TLS in front of Billet) uses Go 1.24+'s
+  `http.Protocols` unencrypted-HTTP/2 support on the RPC listener —
+  the x/net h2c package is deprecated in favour of it. The MCP listener
+  deliberately does not enable unencrypted HTTP/2; nothing needs it
+  there.
+- The top-level `listen` config key and single-listener `serve` wiring
+  were replaced by the symmetric `mcp`/`rpc` blocks. The strict config
+  decoder makes a pre-change config fail loudly (pinned by
+  `TestDecodeLegacyListenKeyRejected`); a compat alias was considered
+  and rejected since the repository is pre-release with no external
+  deployments.
+- `TransportConfig.Enabled` serialises without `omitempty`, so a piped
+  `billet config` output carries `"enabled": false` explicitly instead
+  of being re-defaulted to true by a downstream stage.

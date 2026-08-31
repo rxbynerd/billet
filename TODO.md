@@ -98,11 +98,22 @@ governance: per-call rejection instead of an exit code".
 
 ## 4. Other gaps and deferrals made along the way
 
-- **No caller authentication on the MCP endpoint.** Deliberate v1
-  posture (`docs/security.md`), matching Hairpin's trusted-network
-  stance — but if Billet ever needs to check a bearer token itself
-  (rather than relying on ingress/mesh mTLS), that's new work, not a
-  config flag that already exists.
+- **No caller authentication on either endpoint (MCP or RPC).**
+  Deliberate v1 posture (`docs/security.md`), matching Hairpin's
+  trusted-network stance — but if Billet ever needs to check a bearer
+  token itself (rather than relying on ingress/mesh mTLS or the
+  proxied deployment model's network isolation), that's new work, not
+  a config flag that already exists.
+- **No end-to-end control-plane proxy test against the RPC transport.**
+  `internal/rpcserver`'s tests drive `billet.v1.MemoryService` with the
+  generated connect-go client over both the Connect protocol and
+  cleartext gRPC, and a manual `buf curl` smoke test is recorded in git
+  history — but nothing yet exercises the actual Equestrianism control
+  plane proxying a tool call to Billet. When that integration lands,
+  also decide whether the control plane's infrastructure needs the
+  standard gRPC health (`grpc.health.v1.Health`) or server-reflection
+  services; neither is served in v1 (`buf curl` needs the local
+  `--schema proto` flag for this reason).
 - **No multi-tenancy.** One Billet process serves exactly one
   namespace. Multiple tenants need multiple deployments in v1; there is
   no shared-process, multi-namespace mode.

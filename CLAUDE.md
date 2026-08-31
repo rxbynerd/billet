@@ -9,7 +9,12 @@ Non-negotiables worth repeating:
 
 - No namespace or session_id parameter on `save_memory`/`search_memory`
   — both are bound once at server startup from `BilletConfig`, never
-  supplied by the caller.
+  supplied by the caller. This applies to both transports identically:
+  never add such a field to `proto/billet/v1/memory.proto` either.
+- Tool semantics (validation, limits, budget gating, error policy) live
+  only in `internal/service` — `internal/mcpserver` and
+  `internal/rpcserver` are protocol adapters and must not grow
+  behaviour of their own.
 - Fail closed: a configured `agentcore-memory` backend that fails to
   construct must stop `billet serve` from starting, not silently
   degrade to the `memory` backend.

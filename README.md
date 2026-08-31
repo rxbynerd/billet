@@ -2,13 +2,29 @@
 
 Billet is the **memory sidecar** of the Equestrianism suite — the
 strap/buckle hardware that connects the girth to the saddle. It exposes
-two MCP tools, `save_memory` and `search_memory`, over Streamable HTTP,
-backed by a pluggable storage backend: an in-process ephemeral default,
-or AWS Bedrock AgentCore Memory. It is written in Go, ships as a single
-static binary, and is deliberately thin: it owns the protocol, namespace
-binding, and cost governance, and delegates extraction and consolidation
-entirely to the configured backend. Where Chiron *investigates* and
-Stirrup *changes* code, Billet *remembers*.
+two tools, `save_memory` and `search_memory`, over two transports — MCP
+Streamable HTTP for direct agent access, and Connect RPC
+(`billet.v1.MemoryService`, speaking Connect/gRPC/gRPC-Web) for
+control-plane-proxied deployments — backed by a pluggable storage
+backend: an in-process ephemeral default, or AWS Bedrock AgentCore
+Memory. It is written in Go, ships as a single static binary, and is
+deliberately thin: it owns the protocols, namespace binding, and cost
+governance, and delegates extraction and consolidation entirely to the
+configured backend. Where Chiron *investigates* and Stirrup *changes*
+code, Billet *remembers*.
+
+### Deployment models
+
+- **Direct (default):** the MCP endpoint is reachable from the agent
+  environment; Stirrup's harness calls Billet itself. Minimal moving
+  parts.
+- **Proxied:** only the RPC endpoint is enabled (`--rpc --mcp=false`),
+  reachable solely by the control plane, which proxies tool calls to
+  Billet — the agent environment gets no network path to the knowledge
+  system, preserving Stirrup's no-direct-egress security posture while
+  staying compatible with the rest of the Equestrianism toolset.
+- Both transports can run at once (separate listeners, one shared
+  backend and budget).
 
 ## Building
 
@@ -27,8 +43,11 @@ Requires Go 1.27. Without `just`: `go build -o bin/billet ./cmd/billet`.
 ### The two commands
 
 ```sh
-# Start the MCP server (loopback-only default; see the --listen note below).
+# Start the server (MCP only, loopback-only default; see the --listen note below).
 billet serve
+
+# Control-plane-proxied model: RPC only, no direct MCP surface.
+billet serve --rpc --mcp=false
 
 # Emit the resolved BilletConfig JSON without starting a server.
 billet config --backend agentcore-memory --region eu-west-2 --memory-id mem-abc123
@@ -45,7 +64,8 @@ billet config --backend agentcore-memory --region eu-west-2 --memory-id mem-abc1
     "credentialsRef": "secret://AWS_PROFILE"
   },
   "namespace": "prod",
-  "listen": "127.0.0.1:8140",
+  "mcp": { "enabled": true, "listen": "127.0.0.1:8140" },
+  "rpc": { "enabled": false, "listen": "127.0.0.1:8141" },
   "budget": { "monthlyGbp": 50 }
 }
 ```
@@ -60,7 +80,10 @@ to a billable cloud service by accident. `namespace` is required when
 
 | Flag | Config field | Default | Notes |
 | --- | --- | --- | --- |
-| `--listen` | `listen` | `127.0.0.1:8140` | MCP Streamable HTTP bind address. Loopback-only by default — the endpoint is unauthenticated, so exposing it further (`--listen :8140` or a non-loopback address) is an explicit operator choice. |
+| `--mcp` | `mcp.enabled` | `true` | Serve the MCP Streamable HTTP endpoint (direct agent-environment access). |
+| `--listen` | `mcp.listen` | `127.0.0.1:8140` | MCP bind address. Loopback-only by default — the endpoint is unauthenticated, so exposing it further (`--listen :8140` or a non-loopback address) is an explicit operator choice. |
+| `--rpc` | `rpc.enabled` | `false` | Serve the `billet.v1.MemoryService` Connect RPC endpoint (control-plane-proxied access). |
+| `--rpc-listen` | `rpc.listen` | `127.0.0.1:8141` | RPC bind address; same loopback-only reasoning as `--listen`. |
 | `--namespace` | `namespace` | `default` | Long-term recall scope (AgentCore `actorId`); required for `agentcore-memory`. |
 | `--backend` | `backend.type` | `memory` | `memory` or `agentcore-memory`. |
 | `--region` | `backend.region` | — | AWS region (`agentcore-memory`). |
@@ -76,14 +99,25 @@ to `secret://[REDACTED]` by default; pass `--redact=false` when a
 pipeline stage genuinely needs the real value to flow through to the next
 stage or to `billet serve`.
 
-### MCP tools
+At least one transport must be enabled; when both are, they must bind
+distinct addresses.
+
+### The tool surface
 
 | Tool | Input | Output |
 | --- | --- | --- |
 | `save_memory` | `content: string`, `kind?: "event"\|"fact"` | `{memory_id, accepted}` |
 | `search_memory` | `query: string`, `limit?: int` (default 5) | `{records: [{memory_id, content, score, created_at}]}` |
 
-Neither tool takes a `namespace` or `session_id` parameter — both are
+The RPC transport exposes the same operations as
+`billet.v1.MemoryService.SaveMemory`/`SearchMemory`
+([`proto/billet/v1/memory.proto`](proto/billet/v1/memory.proto));
+Go clients import the generated stubs from
+`github.com/rxbynerd/billet/gen/billet/v1/billetv1connect`. Semantics
+are identical on both transports — validation, limits, budget gating,
+and error policy live in one shared core (`internal/service`).
+
+No tool or RPC takes a `namespace` or `session_id` parameter — both are
 bound once at server startup from `BilletConfig`, not chosen per call by
 the calling LLM (see `docs/DECISIONS.md`).
 
