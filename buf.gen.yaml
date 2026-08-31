@@ -1,0 +1,11 @@
+version: v2
+clean: true
+plugins:
+  # Plugin versions are pinned by go.mod tool directives, so codegen is
+  # reproducible without a local protoc or plugin install.
+  - local: [go, tool, protoc-gen-go]
+    out: gen
+    opt: paths=source_relative
+  - local: [go, tool, protoc-gen-connect-go]
+    out: gen
+    opt: paths=source_relative

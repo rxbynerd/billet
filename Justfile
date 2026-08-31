@@ -15,6 +15,13 @@ test:
 vet:
     go vet ./...
 
+# Regenerate gen/ from proto/ (buf + go.mod-pinned plugins). The
+# generated code is committed, so this only needs re-running when
+# proto/ changes.
+proto:
+    buf lint
+    buf generate
+
 # Lint with golangci-lint if installed; fall back to go vet.
 lint:
     @if command -v golangci-lint >/dev/null 2>&1; then \

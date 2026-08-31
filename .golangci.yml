@@ -12,6 +12,9 @@ linters:
   exclusions:
     presets:
       - std-error-handling
+    paths:
+      # Generated protobuf/connect stubs (see buf.gen.yaml).
+      - gen
     rules:
       - path: _test\.go
         linters:

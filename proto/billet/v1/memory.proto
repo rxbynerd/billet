@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package billet.v1;
+
+option go_package = "github.com/rxbynerd/billet/gen/billet/v1;billetv1";
+
+// MemoryService is Billet's tool surface for control-plane callers: the
+// same save_memory/search_memory semantics the MCP transport exposes,
+// served over Connect RPC so a control plane can proxy tool calls to
+// Billet without the agent environment having direct network access.
+//
+// There is deliberately no namespace or session field anywhere in this
+// contract: both are bound once at server startup from BilletConfig,
+// never supplied by the caller (docs/DECISIONS.md).
+service MemoryService {
+  // SaveMemory persists one memory (a raw turn or an explicit fact).
+  rpc SaveMemory(SaveMemoryRequest) returns (SaveMemoryResponse);
+  // SearchMemory returns previously saved memories, best matches first.
+  rpc SearchMemory(SearchMemoryRequest) returns (SearchMemoryResponse);
+}
+
+// Kind hints how a saved memory should be treated. Backends may ignore
+// it.
+enum Kind {
+  // Treated as KIND_EVENT.
+  KIND_UNSPECIFIED = 0;
+  KIND_EVENT = 1;
+  KIND_FACT = 2;
+}
+
+message SaveMemoryRequest {
+  // The raw turn content or an explicit fact to remember. At most
+  // 256 KiB; larger content is rejected with INVALID_ARGUMENT.
+  string content = 1;
+  Kind kind = 2;
+}
+
+message SaveMemoryResponse {
+  // Opaque, backend-assigned memory ID. Acceptance does not imply the
+  // memory is immediately searchable — a backend may extract or index
+  // asynchronously.
+  string memory_id = 1;
+  bool accepted = 2;
+}
+
+message SearchMemoryRequest {
+  string query = 1;
+  // Maximum number of records to return. Zero or negative applies the
+  // documented default of 5; values above 100 are clamped to 100.
+  int32 limit = 2;
+}
+
+message MemoryRecord {
+  string memory_id = 1;
+  string content = 2;
+  double score = 3;
+  // RFC 3339.
+  string created_at = 4;
+}
+
+message SearchMemoryResponse {
+  repeated MemoryRecord records = 1;
+}
