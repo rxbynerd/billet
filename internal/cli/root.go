@@ -26,12 +26,14 @@ func Execute() int {
 func NewRootCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "billet",
-		Short: "Billet is the Equestrianism suite's MCP memory sidecar",
-		Long: `Billet exposes save_memory and search_memory as MCP tools over
-Streamable HTTP, backed by a pluggable storage backend (an in-process
-default, or AWS Bedrock AgentCore Memory). It owns the protocol, safety
-posture, and backend pluggability; it does not implement memory
-extraction or consolidation itself.`,
+		Short: "Billet is the Equestrianism suite's memory sidecar",
+		Long: `Billet exposes save_memory and search_memory over two transports —
+MCP Streamable HTTP for direct agent access, and billet.v1.MemoryService
+Connect RPC for control-plane-proxied deployments — backed by a
+pluggable storage backend (an in-process default, or AWS Bedrock
+AgentCore Memory). It owns the protocols, safety posture, and backend
+pluggability; it does not implement memory extraction or consolidation
+itself.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}

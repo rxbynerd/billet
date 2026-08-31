@@ -154,6 +154,10 @@ func runServe(cmd *cobra.Command, cfg config.BilletConfig) error {
 	var serveErr error
 	select {
 	case serveErr = <-errCh:
+		// Fail fast, deliberately: one dead transport takes the process
+		// down rather than leaving a half-serving Billet up — the same
+		// no-silent-degradation posture as fail-closed backend
+		// construction.
 		logger.Error("listener failed; shutting down", "error", serveErr)
 	case sig := <-sigCh:
 		logger.Info("shutting down", "signal", sig.String())
@@ -167,7 +171,17 @@ func runServe(cmd *cobra.Command, cfg config.BilletConfig) error {
 				"transport", tr.name, "error", err)
 		}
 	}
-	return serveErr
+
+	// A second listener may have failed while the first failure was being
+	// handled; surface it in the logs rather than dropping it.
+	for {
+		select {
+		case err := <-errCh:
+			logger.Error("additional listener failure during shutdown", "error", err)
+		default:
+			return serveErr
+		}
+	}
 }
 
 func listenOrDisabled(t config.TransportConfig) string {
