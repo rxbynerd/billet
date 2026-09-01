@@ -35,9 +35,31 @@ just test    # go test ./...
 just vet     # go vet ./...
 just lint    # golangci-lint if installed, else go vet
 just ci      # everything CI runs
+just image   # podman build -t localhost/billet:dev -f Containerfile .
 ```
 
 Requires Go 1.27. Without `just`: `go build -o bin/billet ./cmd/billet`.
+
+### Container image
+
+`Containerfile` produces a distroless image that runs as uid 65532 and
+works on a read-only root filesystem. `.github/workflows/image.yml`
+publishes it to `ghcr.io/rxbynerd/billet:latest` (plus a `sha-<commit>`
+tag) on every push to `main`. The default command serves MCP on `:8140`;
+the RPC-only, control-plane-proxied model needs a writable mount for the
+bolt database:
+
+```sh
+podman run --read-only -v billet-data:/var/lib/billet -p 8141:8141 \
+  ghcr.io/rxbynerd/billet:latest \
+  serve --rpc --mcp=false --rpc-listen=:8141 \
+  --backend=bolt --db-path=/var/lib/billet/billet.db --namespace=<ns>
+```
+
+The image pre-creates `/var/lib/billet` owned by uid 65532, so a fresh
+named volume inherits that ownership. A tmpfs or bind mount over it must
+be writable by that uid itself (Kubernetes emptyDir is; `podman --tmpfs`
+defaults to root-only, pass `mode=1777`).
 
 ## Usage
 
