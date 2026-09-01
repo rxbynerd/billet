@@ -5,9 +5,10 @@
 // tenant's memory it reads or writes (docs/DECISIONS.md, "no namespace
 // parameter on the tools").
 //
-// v1 ships exactly two implementations: Memory (in-process, ephemeral,
-// the default) and the AWS Bedrock AgentCore Memory adapter. Selecting
-// between them is a config change, not a code change.
+// v1 ships three implementations: Memory (in-process, ephemeral, the
+// default), Bolt (a local, persistent bbolt-backed store), and the AWS
+// Bedrock AgentCore Memory adapter. Selecting between them is a config
+// change, not a code change.
 package backend
 
 import "context"
