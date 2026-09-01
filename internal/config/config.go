@@ -67,7 +67,9 @@ type BackendConfig struct {
 	// Path is the database file for the bolt backend. Created if absent,
 	// but its parent directory must already exist — a missing directory
 	// fails backend construction rather than being silently created.
-	// Namespace is not used by this backend.
+	// BilletConfig.Namespace selects a per-namespace bucket within this
+	// file, so multiple namespaces can share one database file without
+	// seeing each other's memories.
 	Path string `json:"path,omitempty" yaml:"path,omitempty"`
 }
 
@@ -164,8 +166,8 @@ func (c BilletConfig) Redact() BilletConfig {
 }
 
 // Validate checks the declarative invariants: backend type enumeration,
-// the agentcore-memory namespace requirement, the secret:// rule for
-// CredentialsRef, and non-negative budget.
+// the agentcore-memory and bolt namespace requirements, the secret://
+// rule for CredentialsRef, and non-negative budget.
 func (c BilletConfig) Validate() error {
 	switch c.Backend.Type {
 	case "", BackendMemory:
@@ -186,6 +188,13 @@ func (c BilletConfig) Validate() error {
 	case BackendBolt:
 		if strings.TrimSpace(c.Backend.Path) == "" {
 			return errors.New("backend.path: required when backend.type is \"bolt\"")
+		}
+		ns := strings.TrimSpace(c.Namespace)
+		if ns == "" {
+			return errors.New("namespace: required when backend.type is \"bolt\" — it selects the per-namespace bucket within backend.path and must not be left to a default")
+		}
+		if !namespacePattern.MatchString(ns) {
+			return errors.New("namespace: does not match the required shape ^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$ — this keeps bolt's per-namespace bucket names from colliding")
 		}
 	default:
 		return fmt.Errorf("backend.type: %q is not %q, %q, or %q", c.Backend.Type, BackendMemory, BackendAgentCoreMemory, BackendBolt)

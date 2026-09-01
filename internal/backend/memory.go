@@ -64,8 +64,11 @@ func (m *Memory) Save(_ context.Context, req SaveRequest) (string, error) {
 // override returns no results only when there is nothing stored.
 func (m *Memory) Search(_ context.Context, req SearchRequest) ([]Record, error) {
 	limit := req.Limit
-	if limit <= 0 {
+	switch {
+	case limit <= 0:
 		limit = 5
+	case limit > maxSearchResults:
+		limit = maxSearchResults
 	}
 
 	m.mu.Lock()

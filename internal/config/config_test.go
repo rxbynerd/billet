@@ -203,6 +203,36 @@ func TestValidateBoltAcceptsPath(t *testing.T) {
 	}
 }
 
+func TestValidateBoltRequiresNamespace(t *testing.T) {
+	cfg := Default()
+	cfg.Backend.Type = BackendBolt
+	cfg.Backend.Path = "/var/lib/billet/billet.db"
+	cfg.Namespace = ""
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate accepted bolt with an empty namespace")
+	}
+	if !strings.Contains(err.Error(), "namespace") {
+		t.Errorf("error = %v, want it to mention namespace", err)
+	}
+}
+
+func TestValidateBoltRejectsUnsafeNamespaceShape(t *testing.T) {
+	cfg := Default()
+	cfg.Backend.Type = BackendBolt
+	cfg.Backend.Path = "/var/lib/billet/billet.db"
+	cfg.Namespace = "-acme"
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate accepted bolt with an unsafely-shaped namespace")
+	}
+	if !strings.Contains(err.Error(), "namespace") {
+		t.Errorf("error = %v, want it to mention namespace", err)
+	}
+}
+
 func TestValidateUnknownBackendType(t *testing.T) {
 	cfg := Default()
 	cfg.Backend.Type = "made-up-backend"

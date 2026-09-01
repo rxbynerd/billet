@@ -148,6 +148,25 @@ func testBackendContract(t *testing.T, newBackend func(t *testing.T) Backend) {
 		}
 	})
 
+	t.Run("SearchClampsExcessiveLimit", func(t *testing.T) {
+		ctx := context.Background()
+		b := newBackend(t)
+
+		for i := 0; i < maxSearchResults+10; i++ {
+			if _, err := b.Save(ctx, SaveRequest{Content: "hay for the horse"}); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+		}
+
+		results, err := b.Search(ctx, SearchRequest{Query: "hay", Limit: 1 << 31})
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if len(results) != maxSearchResults {
+			t.Fatalf("Search with Limit 1<<31 returned %d results, want the %d ceiling", len(results), maxSearchResults)
+		}
+	})
+
 	t.Run("SearchNoMatchesStillReturnsRecords", func(t *testing.T) {
 		ctx := context.Background()
 		b := newBackend(t)
@@ -228,7 +247,7 @@ func TestBackendContract(t *testing.T) {
 		{
 			name: "Bolt",
 			newBackend: func(t *testing.T) Backend {
-				b, err := NewBoltBackend(filepath.Join(t.TempDir(), "billet.db"))
+				b, err := NewBoltBackend(filepath.Join(t.TempDir(), "billet.db"), "test-namespace")
 				if err != nil {
 					t.Fatalf("NewBoltBackend: %v", err)
 				}

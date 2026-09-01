@@ -84,7 +84,7 @@ func buildBackend(ctx context.Context, cfg config.BilletConfig) (backend.Backend
 			CredentialsRef: cfg.Backend.CredentialsRef,
 		}, secret.Default())
 	case config.BackendBolt:
-		return backend.NewBoltBackend(cfg.Backend.Path)
+		return backend.NewBoltBackend(cfg.Backend.Path, cfg.Namespace)
 	default:
 		return nil, fmt.Errorf("unknown backend.type %q", cfg.Backend.Type)
 	}
