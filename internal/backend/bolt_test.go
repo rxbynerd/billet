@@ -392,3 +392,48 @@ func TestBoltSearchRejectsCanceledContext(t *testing.T) {
 	}
 }
 
+// TestBoltSaveAfterClose and TestBoltSearchAfterClose pin the shape of
+// the error Save/Search surface once the underlying database is closed:
+// runServe's shutdown ordering closes the backend only after the HTTP
+// drain, so this path is unlikely in production, but the wrap around
+// bbolt's ErrDatabaseNotOpen was previously unverified.
+func TestBoltSaveAfterClose(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "billet.db")
+	b, err := NewBoltBackend(path, testNamespace)
+	if err != nil {
+		t.Fatalf("NewBoltBackend: %v", err)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	_, err = b.Save(ctx, SaveRequest{Content: "anything"})
+	if err == nil {
+		t.Fatal("Save succeeded on a closed Bolt")
+	}
+	if !strings.Contains(err.Error(), "bolt: save:") {
+		t.Errorf("error = %q, want it prefixed with %q", err.Error(), "bolt: save:")
+	}
+}
+
+func TestBoltSearchAfterClose(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "billet.db")
+	b, err := NewBoltBackend(path, testNamespace)
+	if err != nil {
+		t.Fatalf("NewBoltBackend: %v", err)
+	}
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	_, err = b.Search(ctx, SearchRequest{Query: "anything"})
+	if err == nil {
+		t.Fatal("Search succeeded on a closed Bolt")
+	}
+	if !strings.Contains(err.Error(), "bolt: search:") {
+		t.Errorf("error = %q, want it prefixed with %q", err.Error(), "bolt: search:")
+	}
+}
+

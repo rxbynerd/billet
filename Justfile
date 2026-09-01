@@ -7,9 +7,10 @@
 build:
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/billet ./cmd/billet
 
-# Run all tests.
+# Run all tests, with the race detector on by default: several tests
+# (concurrent Save/Search) exist specifically to be run under -race.
 test:
-    go test ./...
+    go test -race ./...
 
 # Vet the whole module.
 vet:
