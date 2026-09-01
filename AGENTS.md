@@ -23,6 +23,7 @@ just test    # go test ./...
 just vet     # go vet ./...
 just lint    # golangci-lint if installed, else go vet
 just ci      # everything CI runs
+just image   # podman build of Containerfile (distroless, uid 65532)
 ```
 
 ## Per-package map

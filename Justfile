@@ -34,3 +34,7 @@ lint:
 
 # Everything CI runs.
 ci: build vet test lint
+
+# Build the container image with podman (this machine has no docker).
+image tag="localhost/billet:dev":
+    podman build -t {{tag}} -f Containerfile .
