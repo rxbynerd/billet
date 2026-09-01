@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"io"
+	"path/filepath"
 	"testing"
 
 	"github.com/rxbynerd/billet/internal/backend"
@@ -41,5 +43,38 @@ func TestBuildBackendAgentCoreMemoryFailsClosed(t *testing.T) {
 
 	if _, err := buildBackend(context.Background(), cfg); err == nil {
 		t.Fatal("buildBackend accepted an agentcore-memory config with an unresolvable credentialsRef")
+	}
+}
+
+func TestBuildBackendBoltConstructs(t *testing.T) {
+	cfg := config.Default()
+	cfg.Backend.Type = config.BackendBolt
+	cfg.Backend.Path = filepath.Join(t.TempDir(), "billet.db")
+
+	b, err := buildBackend(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("buildBackend: %v", err)
+	}
+
+	closer, ok := b.(io.Closer)
+	if !ok {
+		t.Fatalf("buildBackend returned %T, want it to implement io.Closer", b)
+	}
+	if err := closer.Close(); err != nil {
+		t.Errorf("Close: %v", err)
+	}
+}
+
+// TestBuildBackendBoltFailsClosed pins the safety-posture requirement: a
+// bolt backend whose database path names a nonexistent directory must
+// return an error rather than silently falling back to the memory
+// backend.
+func TestBuildBackendBoltFailsClosed(t *testing.T) {
+	cfg := config.Default()
+	cfg.Backend.Type = config.BackendBolt
+	cfg.Backend.Path = filepath.Join(t.TempDir(), "missing", "billet.db")
+
+	if _, err := buildBackend(context.Background(), cfg); err == nil {
+		t.Fatal("buildBackend accepted a bolt path with a nonexistent parent directory")
 	}
 }

@@ -48,8 +48,11 @@ func NewBoltBackend(path string) (*Bolt, error) {
 		_, err := tx.CreateBucketIfNotExists(recordsBucket)
 		return err
 	}); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("bolt: initialize %s: %w", path, err)
+		err = fmt.Errorf("bolt: initialize %s: %w", path, err)
+		if closeErr := db.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("bolt: close %s: %w", path, closeErr))
+		}
+		return nil, err
 	}
 
 	return &Bolt{db: db}, nil

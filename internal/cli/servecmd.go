@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -48,10 +49,10 @@ Streamable HTTP (--mcp, default on) for direct agent-environment
 access, and/or billet.v1.MemoryService Connect RPC (--rpc, default off)
 for control-plane-proxied access.
 
-Fails closed: if backend.type names a real backend (agentcore-memory)
-and it cannot be constructed (bad credentials, unreachable region, and
-so on), billet exits non-zero rather than falling back to the in-process
-memory backend.`,
+Fails closed: if backend.type names a durable backend (agentcore-memory,
+bolt) and it cannot be constructed (bad credentials, unreachable region,
+an unwritable database path, and so on), billet exits non-zero rather
+than falling back to the in-process memory backend.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := resolveConfig(cmd)
@@ -82,6 +83,8 @@ func buildBackend(ctx context.Context, cfg config.BilletConfig) (backend.Backend
 			Namespace:      cfg.Namespace,
 			CredentialsRef: cfg.Backend.CredentialsRef,
 		}, secret.Default())
+	case config.BackendBolt:
+		return backend.NewBoltBackend(cfg.Backend.Path)
 	default:
 		return nil, fmt.Errorf("unknown backend.type %q", cfg.Backend.Type)
 	}
@@ -99,6 +102,13 @@ func runServe(cmd *cobra.Command, cfg config.BilletConfig) error {
 		logger.Error("backend construction failed; refusing to start",
 			"backend", cfg.Backend.Type, "error", err)
 		return fmt.Errorf("backend construction failed: %w", err)
+	}
+	if closer, ok := b.(io.Closer); ok {
+		defer func() {
+			if err := closer.Close(); err != nil {
+				logger.Warn("backend close failed", "error", err)
+			}
+		}()
 	}
 
 	guard := cost.NewGuard(cfg.Budget.MonthlyGBP, os.Stderr)
