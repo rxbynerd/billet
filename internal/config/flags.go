@@ -18,10 +18,11 @@ func RegisterFlags(fs *pflag.FlagSet) {
 	fs.Bool("rpc", d.RPC.Enabled, "serve the billet.v1.MemoryService Connect RPC endpoint (control-plane proxied access)")
 	fs.String("rpc-listen", d.RPC.Listen, "address the Connect RPC endpoint binds")
 	fs.String("namespace", d.Namespace, "long-term recall scope (AgentCore actorId); required for the agentcore-memory backend")
-	fs.String("backend", d.Backend.Type, fmt.Sprintf("backend type: %q or %q", BackendMemory, BackendAgentCoreMemory))
+	fs.String("backend", d.Backend.Type, fmt.Sprintf("backend type: %q, %q, or %q", BackendMemory, BackendAgentCoreMemory, BackendBolt))
 	fs.String("region", "", "AWS region (agentcore-memory backend)")
 	fs.String("memory-id", "", "AgentCore Memory resource ID (agentcore-memory backend)")
 	fs.String("credentials-ref", "", "secret:// reference selecting AWS credentials (agentcore-memory backend)")
+	fs.String("db-path", "", "database file path (bolt backend)")
 	fs.Float64("budget", 0, "rough monthly cost estimate cap in GBP; unset means uncapped")
 }
 
@@ -49,6 +50,8 @@ func ApplyFlags(cfg *BilletConfig, fs *pflag.FlagSet) error {
 			cfg.Backend.MemoryID, _ = fs.GetString(f.Name)
 		case "credentials-ref":
 			cfg.Backend.CredentialsRef, _ = fs.GetString(f.Name)
+		case "db-path":
+			cfg.Backend.Path, _ = fs.GetString(f.Name)
 		case "budget":
 			cfg.Budget.MonthlyGBP, _ = fs.GetFloat64(f.Name)
 		}

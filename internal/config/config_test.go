@@ -96,6 +96,20 @@ func TestDecodeJSONRoundtrip(t *testing.T) {
 	}
 }
 
+func TestDecodeBoltPath(t *testing.T) {
+	input := `{"backend": {"type": "bolt", "path": "/var/lib/billet/billet.db"}}`
+	cfg, err := Decode(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if cfg.Backend.Type != BackendBolt {
+		t.Errorf("Backend.Type = %q, want %q", cfg.Backend.Type, BackendBolt)
+	}
+	if cfg.Backend.Path != "/var/lib/billet/billet.db" {
+		t.Errorf("Backend.Path = %q, want /var/lib/billet/billet.db", cfg.Backend.Path)
+	}
+}
+
 func TestDecodeUnknownFieldRejected(t *testing.T) {
 	_, err := Decode(strings.NewReader(`{"backendd": {"type": "memory"}}`))
 	if err == nil {
@@ -162,6 +176,30 @@ func TestValidateAgentCoreMemoryRequiresRegionAndMemoryID(t *testing.T) {
 				t.Fatal("Validate accepted an incomplete agentcore-memory config")
 			}
 		})
+	}
+}
+
+func TestValidateBoltRequiresPath(t *testing.T) {
+	cfg := Default()
+	cfg.Backend.Type = BackendBolt
+	cfg.Backend.Path = ""
+
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate accepted bolt with an empty path")
+	}
+	if !strings.Contains(err.Error(), "backend.path") {
+		t.Errorf("error = %v, want it to mention backend.path", err)
+	}
+}
+
+func TestValidateBoltAcceptsPath(t *testing.T) {
+	cfg := Default()
+	cfg.Backend.Type = BackendBolt
+	cfg.Backend.Path = "/var/lib/billet/billet.db"
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate rejected a bolt config with a path: %v", err)
 	}
 }
 
@@ -317,6 +355,17 @@ func TestRedactScrubsCredentialsRef(t *testing.T) {
 	}
 }
 
+func TestRedactLeavesPathUntouched(t *testing.T) {
+	cfg := Default()
+	cfg.Backend.Type = BackendBolt
+	cfg.Backend.Path = "/var/lib/billet/billet.db"
+
+	redacted := cfg.Redact()
+	if redacted.Backend.Path != "/var/lib/billet/billet.db" {
+		t.Errorf("Redact() Path = %q, want it left untouched (not a credential)", redacted.Backend.Path)
+	}
+}
+
 func TestApplyFlagsOverlaysOnlySetFlags(t *testing.T) {
 	base := Default()
 	base.Namespace = "from-base-config"
@@ -353,6 +402,7 @@ func TestApplyFlagsAllFields(t *testing.T) {
 		"--region", "eu-west-2",
 		"--memory-id", "mem-1",
 		"--credentials-ref", "secret://AWS_PROFILE",
+		"--db-path", "/var/lib/billet/billet.db",
 		"--budget", "12.5",
 	}
 	if err := fs.Parse(args); err != nil {
@@ -368,6 +418,7 @@ func TestApplyFlagsAllFields(t *testing.T) {
 			Region:         "eu-west-2",
 			MemoryID:       "mem-1",
 			CredentialsRef: "secret://AWS_PROFILE",
+			Path:           "/var/lib/billet/billet.db",
 		},
 		Namespace: "ns",
 		MCP:       TransportConfig{Enabled: false, Listen: ":1234"},

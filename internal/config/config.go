@@ -23,6 +23,8 @@ const (
 	BackendMemory = "memory"
 	// BackendAgentCoreMemory is the AWS Bedrock AgentCore Memory adapter.
 	BackendAgentCoreMemory = "agentcore-memory"
+	// BackendBolt is the local, persistent bbolt-file-backed backend.
+	BackendBolt = "bolt"
 )
 
 // Default listen addresses for the two transports. Loopback-only:
@@ -62,6 +64,11 @@ type BackendConfig struct {
 	// secret://AWS_PROFILE, naming an environment variable that holds a
 	// shared-config profile name). Never a literal credential.
 	CredentialsRef string `json:"credentialsRef,omitempty" yaml:"credentialsRef,omitempty"`
+	// Path is the database file for the bolt backend. Created if absent,
+	// but its parent directory must already exist — a missing directory
+	// fails backend construction rather than being silently created.
+	// Namespace is not used by this backend.
+	Path string `json:"path,omitempty" yaml:"path,omitempty"`
 }
 
 // TransportConfig configures one of Billet's two transports. Each
@@ -176,8 +183,12 @@ func (c BilletConfig) Validate() error {
 		if strings.TrimSpace(c.Backend.MemoryID) == "" {
 			return errors.New("backend.memoryId: required when backend.type is \"agentcore-memory\"")
 		}
+	case BackendBolt:
+		if strings.TrimSpace(c.Backend.Path) == "" {
+			return errors.New("backend.path: required when backend.type is \"bolt\"")
+		}
 	default:
-		return fmt.Errorf("backend.type: %q is not %q or %q", c.Backend.Type, BackendMemory, BackendAgentCoreMemory)
+		return fmt.Errorf("backend.type: %q is not %q, %q, or %q", c.Backend.Type, BackendMemory, BackendAgentCoreMemory, BackendBolt)
 	}
 
 	if c.Backend.CredentialsRef != "" && !strings.HasPrefix(c.Backend.CredentialsRef, "secret://") {
