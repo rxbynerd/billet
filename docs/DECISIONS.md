@@ -377,3 +377,76 @@ Consequences of note:
 - `TransportConfig.Enabled` serialises without `omitempty`, so a piped
   `billet config` output carries `"enabled": false` explicitly instead
   of being re-defaulted to true by a downstream stage.
+
+## 2026-09-01: `bolt` backend — a persistent, no-AWS local store
+
+`agentcore-memory` is the only durable option in v1, and it requires an
+AWS account — unavailable in this environment and an unwelcome
+dependency for anyone who wants persistence without cloud billing.
+`internal/backend.Bolt` (`internal/backend/bolt.go`, using
+`go.etcd.io/bbolt`, pure Go so `CGO_ENABLED=0` builds are unaffected)
+fills that gap: a single local file, no network, no account.
+
+**Namespace binds to a per-namespace bucket, not a per-deployment
+file.** `NewBoltBackend(path, namespace)` derives the bucket
+`"records/" + namespace` inside the database at `path`, mirroring
+`agentcore-memory`'s `boundNamespace` construction-time binding (see
+"No namespace or session_id parameter on the tools", above) rather than
+inventing a different mechanism. This was a gap in the first landed
+version — a single fixed bucket meant any two `BilletConfig`s pointed at
+the same file saw each other's memories regardless of namespace — closed
+in the same pass that added it, per a review wave's finding. `Validate`
+now requires a namespace for `backend.type: bolt`, matching the
+`agentcore-memory` requirement and the same `namespacePattern` shape
+check, since the reasoning is identical: an unqualified or malformed
+namespace is a silent isolation gap.
+
+**Search skips and warns on a corrupt record rather than failing the
+whole query.** The first version aborted the entire `View` transaction
+on the first record that failed to decode, which meant one torn write
+(or a future incompatible on-disk schema) could permanently disable
+`search_memory` for a namespace while `save_memory` kept accepting
+writes underneath it — availability asymmetry nobody chose on purpose.
+`Bolt.Search` now counts and skips undecodable records (`v == nil`, a
+key that isn't the expected 8 bytes, or a JSON decode failure) and logs
+once per call via `slog.Warn` with the count and the first offending
+key. This trades strict correctness (a decode failure should in
+principle mean something is wrong) for availability (the store keeps
+serving everything it can read) — the same trade this project already
+makes by preferring a rough cost estimate over exact billing, and by
+scoring token overlap instead of true semantic search in the two local
+backends.
+
+**A pre-existing file with looser-than-0600 permissions is rejected,
+not silently reused.** `bbolt.Open`'s mode argument only applies to a
+newly created file (`os.OpenFile` semantics); an already-existing file
+at `backend.path` keeps whatever permissions it had. `NewBoltBackend`
+now `os.Stat`s the path first and fails construction if a pre-existing
+file allows group or other access, rather than opening it as-is. This is
+deliberately stricter than `internal/secret/resolve.go`'s precedent for
+`secret://` file backends, which only warns on loose permissions and
+proceeds — accepted there because a misconfigured secret file is the
+operator's own credential to lose, but a bolt database holds every
+memory this Billet instance will ever save, in plaintext, so silently
+trusting an inherited or restored file's permissions was judged too
+risky to only warn about.
+
+Other choices carried over unremarked from the first version, recorded
+here for completeness: `bbolt.Open`'s lock `Timeout` is 1 second, long
+enough to distinguish "another `billet serve` has this file open" from
+a hang, short enough not to make a misconfigured second instance wait
+noticeably; bbolt's `NoSync` option is not exposed — Billet takes the
+durability bbolt gives it by default rather than trading it for write
+throughput; and `Bolt`'s `Close` method is discovered by the
+composition root (`internal/cli/servecmd.go`) via an `io.Closer` type
+assertion rather than being added to `Backend` itself, since `Memory`
+and `AgentCoreMemory` have nothing to release and adding an unused
+method to the interface would make every future `Backend` carry a
+no-op.
+
+**Deferred, not fixed this pass** (see `TODO.md` for the full writeup):
+unbounded on-disk growth and the full-`Search` scan cost that compounds
+it; the same growth exposure reframed as an unauthenticated durable
+write sink; `backend.path` not being normalized (`filepath.Abs`, `~`
+expansion, symlink handling); and `Close`'s block during shutdown having
+no bound of its own past the drain's grace period.

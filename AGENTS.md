@@ -32,7 +32,7 @@ just ci      # everything CI runs
 | `cmd/billet` | Entrypoint; `os.Exit(cli.Execute())` and nothing else. |
 | `internal/cli` | Cobra command tree (`serve`, `config`), flag→config resolution, and the composition root: the only place environment is read, the backend is selected and constructed, and the server is started. |
 | `internal/config` | `BilletConfig`: the single declarative config. JSON/YAML, flag binding, base+overlay merge semantics for pipelines, validation (backend type enum, the agentcore-memory namespace/region/memoryId requirement, the secret:// rule). |
-| `internal/backend` | The `Backend` seam (`Save`/`Search`, namespace and session bound at construction, not per call) plus its two v1 implementations: `Memory` (in-process, ephemeral, dependency-free, the default and the test-suite backend) and `AgentCoreMemory` (AWS Bedrock AgentCore Memory, via the AWS SDK for Go v2). |
+| `internal/backend` | The `Backend` seam (`Save`/`Search`, namespace and session bound at construction, not per call) plus its three v1 implementations: `Memory` (in-process, ephemeral, dependency-free, the default and the test-suite backend), `Bolt` (a local, persistent bbolt-file-backed store, one bucket per namespace), and `AgentCoreMemory` (AWS Bedrock AgentCore Memory, via the AWS SDK for Go v2). |
 | `internal/service` | The transport-neutral core of both tool operations: validation, budget gating, limit clamping, and the generic caller-facing error policy. Both transports adapt this one implementation; tool semantics change here, never in a transport package. |
 | `internal/mcpserver` | The MCP transport: wires `save_memory`/`search_memory` onto `github.com/modelcontextprotocol/go-sdk`'s Streamable HTTP server. See `docs/DECISIONS.md` for the Stirrup-client interop fix (Stateless+JSONResponse mode, Accept-header defaulting) — re-verify against Stirrup's actual client before changing `StreamableHTTPOptions`. |
 | `internal/rpcserver` | The RPC transport: `billet.v1.MemoryService` via connect-go (Connect, gRPC, and gRPC-Web protocols), for control-plane-proxied deployments. Cleartext gRPC needs the hosting `http.Server` to use `rpcserver.Protocols()`. |
@@ -53,9 +53,10 @@ just ci      # everything CI runs
   only in `internal/service`; the transport packages are protocol
   adapters and must not grow behaviour of their own, or the two
   transports drift.
-- Billet fails closed on backend construction failure: if
-  `agentcore-memory` is configured and fails to construct, `billet
-  serve` must exit non-zero, never fall back to the `memory` backend.
+- Billet fails closed on backend construction failure: if a durable
+  backend (`agentcore-memory`, `bolt`) is configured and fails to
+  construct, `billet serve` must exit non-zero, never fall back to the
+  `memory` backend.
 - `secret://` references only — no literal credentials in config, ever.
   `BilletConfig.Validate` and `internal/secret` enforce this; keep it
   that way in any new config surface.

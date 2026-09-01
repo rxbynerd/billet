@@ -6,8 +6,9 @@ two tools, `save_memory` and `search_memory`, over two transports — MCP
 Streamable HTTP for direct agent access, and Connect RPC
 (`billet.v1.MemoryService`, speaking Connect/gRPC/gRPC-Web) for
 control-plane-proxied deployments — backed by a pluggable storage
-backend: an in-process ephemeral default, or AWS Bedrock AgentCore
-Memory. It is written in Go, ships as a single static binary, and is
+backend: an in-process ephemeral default, a local persistent `bolt`
+file, or AWS Bedrock AgentCore Memory. It is written in Go, ships as a
+single static binary, and is
 deliberately thin: it owns the protocols, namespace binding, and cost
 governance, and delegates extraction and consolidation entirely to the
 configured backend. Where Chiron *investigates* and Stirrup *changes*
@@ -75,8 +76,19 @@ base config (`--config <path>`, `--config -`, or piped stdin) → explicit
 flags. `backend.type` defaults to `"memory"` — an in-process, ephemeral
 store with no external dependencies — so a fresh deployment never talks
 to a billable cloud service by accident. `namespace` is required when
-`backend.type` is `"agentcore-memory"`, and must match
-`^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$`.
+`backend.type` is `"agentcore-memory"` or `"bolt"`, and must match
+`^[A-Za-z0-9][A-Za-z0-9_-]{2,63}$`. `backend.path` is required when
+`backend.type` is `"bolt"`: the bbolt database file to use, created if
+absent (its parent directory must already exist). A `bolt` config:
+
+```json
+{
+  "backend": { "type": "bolt", "path": "/var/lib/billet/billet.db" },
+  "namespace": "prod",
+  "mcp": { "enabled": true, "listen": "127.0.0.1:8140" },
+  "rpc": { "enabled": false, "listen": "127.0.0.1:8141" }
+}
+```
 
 | Flag | Config field | Default | Notes |
 | --- | --- | --- | --- |
@@ -84,11 +96,12 @@ to a billable cloud service by accident. `namespace` is required when
 | `--listen` | `mcp.listen` | `127.0.0.1:8140` | MCP bind address. Loopback-only by default — the endpoint is unauthenticated, so exposing it further (`--listen :8140` or a non-loopback address) is an explicit operator choice. |
 | `--rpc` | `rpc.enabled` | `false` | Serve the `billet.v1.MemoryService` Connect RPC endpoint (control-plane-proxied access). |
 | `--rpc-listen` | `rpc.listen` | `127.0.0.1:8141` | RPC bind address; same loopback-only reasoning as `--listen`. |
-| `--namespace` | `namespace` | `default` | Long-term recall scope (AgentCore `actorId`); required for `agentcore-memory`. |
-| `--backend` | `backend.type` | `memory` | `memory` or `agentcore-memory`. |
+| `--namespace` | `namespace` | `default` | Long-term recall scope (AgentCore `actorId`, or a `bolt` database's per-namespace bucket); required for `agentcore-memory` and `bolt`. |
+| `--backend` | `backend.type` | `memory` | `memory`, `agentcore-memory`, or `bolt`. |
 | `--region` | `backend.region` | — | AWS region (`agentcore-memory`). |
 | `--memory-id` | `backend.memoryId` | — | AgentCore Memory resource ID (`agentcore-memory`). |
 | `--credentials-ref` | `backend.credentialsRef` | — | `secret://` reference selecting AWS credentials (`agentcore-memory`). |
+| `--db-path` | `backend.path` | — | Database file path (`bolt`). |
 | `--budget` | `budget.monthlyGbp` | uncapped | Rough, call-count-based cost estimate cap in GBP (not real billing — see `docs/DECISIONS.md`). |
 
 `billet config --validate` checks the resolved config with

@@ -170,3 +170,48 @@ governance: per-call rejection instead of an exit code".
   that starts the real binary and sends it a signal; neither was done in
   the 2026-08-30 fix pass (explicitly out of scope — noted here rather
   than refactored for testability under time pressure).
+- **`bolt` has no bound on full-scan cost or on-disk growth.**
+  `Bolt.Search` decodes and scores every record in a namespace's bucket
+  on every call, inside one read transaction; `Bolt.Save` never removes
+  a record. Flagged by the 2026-09-01 review wave (code review H1/M1,
+  security review LOW "unbounded on-disk growth") as the same underlying
+  risk in two framings: unbounded query cost as a namespace grows, and
+  unbounded storage growth since nothing ever evicts. Options on record
+  for whoever picks this up: a bounded reverse-cursor scan from
+  `Cursor().Last()` instead of a full `ForEach`; a top-k heap instead of
+  sorting every candidate; or a `tx.Size()`/`bucket.Stats().KeyN`
+  write-time ceiling in `Save` that rejects (or evicts) once a namespace
+  gets too large. Not implemented this pass — `docs/security.md`'s
+  "Storage at rest" section documents the exposure as the only
+  mitigation shipped so far.
+- **`bolt`'s durable, unauthenticated `save_memory` is also an
+  unauthenticated disk-filling vector.** Same underlying gap as the item
+  above (security review, corroborating the growth finding from a
+  different angle): with no caller authentication on either transport
+  (see "No caller authentication," above) and no write-time ceiling, any
+  caller that can reach `save_memory` can grow `backend.path` without
+  limit on whatever host runs `billet serve`. Closing the growth item
+  above closes this one too; no separate control is planned.
+- **`backend.path` is not normalized or constrained.**
+  `NewBoltBackend` uses the path as given: no `filepath.Abs`, no `~`
+  expansion, and a symlink at `backend.path` is followed with ordinary
+  filesystem semantics (no `O_EXCL`, no symlink rejection). Low severity
+  — `backend.path` is operator-supplied deployment configuration, not
+  request input — but worth tightening if `bolt` configs ever come from
+  a less-trusted source than they do today.
+- **`Bolt.Close`'s block during shutdown has no bound of its own.**
+  `internal/cli/servecmd.go`'s `defer closer.Close()` runs after the
+  HTTP shutdown drain, but `Close` itself can still block past
+  `shutdownGrace` if a slow full-scan `Search` (see the growth item
+  above) is still in flight when the drain completes — there is no way
+  to interrupt it. Fixing the unbounded-scan-cost item above removes
+  most of this exposure; a comment recording the tradeoff was added at
+  the call site rather than a behaviour change.
+- **`Bolt`'s `CreatedAt` is captured outside the write transaction.**
+  `Save` computes `time.Now().UTC()` before entering `db.Update`, so
+  under concurrent saves a record with a lower sequence number can
+  carry a later `CreatedAt` timestamp than one with a higher sequence
+  number that committed first. Billet's own tiebreak in `Search` sorts
+  by sequence, not `CreatedAt`, so this doesn't affect ranking — flagged
+  by the 2026-09-01 review wave as low severity, method-doc note only,
+  no code change planned.

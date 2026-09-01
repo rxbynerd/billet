@@ -110,6 +110,10 @@ type boltRecord struct {
 // locking. ctx is checked before entering the transaction, but bbolt has
 // no cancellable transaction API: an already-in-flight write still runs
 // to completion even if ctx is canceled while it is queued or running.
+// CreatedAt is captured before the transaction, so under concurrent
+// saves a lower-sequence record can carry a later CreatedAt than a
+// higher-sequence one that committed first; Search's tiebreak sorts by
+// sequence, not CreatedAt, so this does not affect ranking.
 func (b *Bolt) Save(ctx context.Context, req SaveRequest) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", fmt.Errorf("bolt: save: %w", err)

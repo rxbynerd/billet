@@ -41,21 +41,37 @@ delimiter fix makes Billet's own read/write namespace values internally
 coherent and collision-resistant, but does not, on its own, confirm what
 AWS does with them.
 
+Within the `bolt` backend, namespace isolation is structural rather than
+a filter that could be misconfigured: `NewBoltBackend(path, namespace)`
+derives a bucket named `"records/" + namespace` inside the database file,
+so two namespaces sharing one file (an operator choice `bolt` allows —
+one file, many buckets) read and write disjoint bbolt buckets. There is
+no equivalent to `agentcore-memory`'s prefix-match risk, because bbolt
+bucket names require an exact match. `BilletConfig.Validate` requires a
+namespace for `backend.type: bolt` too, for the same reason it requires
+one for `agentcore-memory`: an empty or malformed namespace would be a
+silent isolation gap, this time by defaulting every deployment onto the
+same bucket rather than by a prefix collision.
+
 The isolation this does *not* provide: if two different tenants need
 separate memory, they need two separate Billet deployments (two
-processes, two configs, likely two AgentCore Memory resources), not two
-namespaces inside one process. Billet has no multi-tenancy story in v1.
+processes, two configs, likely two AgentCore Memory resources or two
+`bolt` files/namespaces), not two namespaces inside one process. Billet
+has no multi-tenancy story in v1.
 
 ## Fail closed on backend construction failure
 
 `billet serve` builds its configured backend once, at startup, before
-opening the listener. If `backend.type` is `agentcore-memory` and
-construction fails — a malformed region, an unresolvable
-`credentialsRef`, or an absent/invalid AWS credential chain — the process
-logs the failure and exits non-zero. It never falls back to the
-in-process `memory` backend: silently downgrading a deployment that
-explicitly asked for durable storage into one that forgets everything on
-restart would be a data-loss trap disguised as uptime.
+opening the listener. If `backend.type` names a durable backend
+(`agentcore-memory` or `bolt`) and construction fails — a malformed
+region, an unresolvable `credentialsRef`, an absent/invalid AWS
+credential chain, a locked or corrupt database file, a missing parent
+directory, or a pre-existing database file with loose permissions (see
+"Storage at rest", below) — the process logs the failure and exits
+non-zero. It never falls back to the in-process `memory` backend:
+silently downgrading a deployment that explicitly asked for durable
+storage into one that forgets everything on restart would be a
+data-loss trap disguised as uptime.
 
 Construction actively probes for the failure modes that would otherwise
 only surface on the first `save_memory`/`search_memory` call (AWS
@@ -81,6 +97,43 @@ is unset — but that's a default *for a fresh, unconfigured deployment*,
 not a fallback from a failed one. The distinction matters: choosing the
 safe default is fine; silently substituting it after an explicit,
 failed choice is not.
+
+## Storage at rest (`bolt` backend)
+
+The `bolt` backend stores memory content as plaintext JSON inside a
+single bbolt file at `backend.path`. Billet applies no encryption of its
+own; anything reading that file directly — a backup, a copied volume, a
+process running as the same user — reads memory content unencrypted.
+Confidentiality at rest is a filesystem-level property here, not a
+Billet one.
+
+- **File permissions.** `NewBoltBackend` opens a newly created file at
+  `0600` (owner read/write only). A file that already exists at
+  `backend.path` is checked before opening: if its permissions allow
+  group or other access, construction fails closed instead of silently
+  reusing it — bbolt's own `Open` only tightens the mode of a file it
+  creates, so an inherited or restored file with looser permissions
+  would otherwise go unnoticed. This is stricter than
+  `internal/secret/resolve.go`'s equivalent check for `secret://` file
+  backends, which only warns and proceeds; the divergence is deliberate
+  (`docs/DECISIONS.md`, "bolt backend") because a bolt database
+  accumulates every memory this Billet instance ever saves, not a single
+  operator-controlled secret.
+- **Unbounded on-disk growth.** Nothing in v1 caps how large
+  `backend.path` can grow — every accepted `save_memory` call adds a
+  record and nothing ever removes one. A durable, unauthenticated (see
+  "Trust posture", below) `save_memory` endpoint is therefore also an
+  unauthenticated disk-filling vector on whatever host runs `billet
+  serve`. Not mitigated in v1; tracked in `TODO.md`.
+- **`backend.path` is trusted operator configuration, not request
+  input.** It comes from `BilletConfig`/`--db-path`, set by whoever
+  deploys Billet, never from a tool call. `NewBoltBackend` does not
+  create missing parent directories, resolve symlinks, or normalize the
+  path (no `filepath.Abs`, no `~` expansion) — a missing parent
+  directory fails construction rather than being silently created
+  somewhere unexpected, and a symlinked path is followed as ordinary
+  filesystem semantics dictate, the same trust level as any other
+  file-path config value in this project.
 
 ## Content logging and error detail
 

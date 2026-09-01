@@ -70,8 +70,8 @@ than falling back to the in-process memory backend.`,
 }
 
 // buildBackend constructs the Backend named by cfg.Backend.Type. It never
-// falls back silently: an agentcore-memory config that fails to
-// construct returns an error, not a working memory backend.
+// falls back silently: a durable backend (agentcore-memory, bolt) that
+// fails to construct returns an error, not a working memory backend.
 func buildBackend(ctx context.Context, cfg config.BilletConfig) (backend.Backend, error) {
 	switch cfg.Backend.Type {
 	case "", config.BackendMemory:
@@ -104,6 +104,11 @@ func runServe(cmd *cobra.Command, cfg config.BilletConfig) error {
 		return fmt.Errorf("backend construction failed: %w", err)
 	}
 	if closer, ok := b.(io.Closer); ok {
+		// Close runs after the shutdown drain below, but has no timeout
+		// of its own: a Search still in flight when the drain's grace
+		// period expires can hold Close waiting on it with no way to
+		// interrupt. Bounding Search's own cost (TODO.md) would remove
+		// most of this exposure.
 		defer func() {
 			if err := closer.Close(); err != nil {
 				logger.Warn("backend close failed", "error", err)
